@@ -1,5 +1,6 @@
 import type { ChainEntry, Ctx, Effect } from './types';
 import { getEffect } from './registry';
+import { composite } from './blend';
 
 /**
  * Fold the chain over a source image.
@@ -24,7 +25,7 @@ export function runChain(chain: ChainEntry[], src: ImageData, scale: number): Im
     const out = applyEffect(effect, cur, entry, ctx);
     if (!out) continue;
 
-    cur = entry.mix >= 1 ? out : lerpImage(cur, out, entry.mix);
+    cur = composite(cur, out, entry.blend ?? 'normal', entry.mix);
   }
 
   return cur;
@@ -34,19 +35,6 @@ function applyEffect(effect: Effect, src: ImageData, entry: ChainEntry, ctx: Ctx
   const fn = effect.apply;
   if (!fn) return null;
   return fn(src, entry.params, ctx);
-}
-
-/** Per-channel blend of two same-sized buffers. */
-export function lerpImage(a: ImageData, b: ImageData, t: number): ImageData {
-  const out = new ImageData(a.width, a.height);
-  const A = a.data;
-  const B = b.data;
-  const O = out.data;
-  const inv = 1 - t;
-  for (let i = 0; i < O.length; i++) {
-    O[i] = A[i] * inv + B[i] * t;
-  }
-  return out;
 }
 
 /** Timing helper for the status readout. */

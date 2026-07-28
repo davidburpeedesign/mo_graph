@@ -6,6 +6,10 @@
  * all read from this and nothing else.
  */
 
+import type { BlendMode } from './blend';
+
+export type { BlendMode };
+
 export type Category = 'dither' | 'noise' | 'diffusion' | 'artifact' | 'color' | 'geometry';
 
 /**
@@ -81,7 +85,9 @@ export interface ChainEntry {
   effectId: string;
   params: Params;
   enabled: boolean;
-  /** 0..1 — blends the effect's output back toward its input. */
+  /** How the effect's output combines with its input. */
+  blend: BlendMode;
+  /** 0..1 — mixes the blended result back toward the input. */
   mix: number;
   seed: number;
 }

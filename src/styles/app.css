@@ -298,8 +298,27 @@ button, input, select, label { font: inherit; letter-spacing: inherit; color: in
 .row--selected { background: var(--surface-raise); }
 
 .row__toggle { background: none; border: none; padding: 0; cursor: pointer; color: var(--text-muted); }
-.row__name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row__mix { color: var(--text-faint); font-size: 12px; }
+
+/* Blend mode, edited inline on the row rather than in the inspector. */
+.row__blend {
+  flex: none;
+  width: 84px;
+  padding: 0 2px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: var(--radius-0);
+  color: var(--text-faint);
+  font-size: 11px;
+  cursor: pointer;
+  appearance: none;
+  text-align: right;
+}
+.row__blend:hover { color: var(--text-emphasis); border-bottom-color: var(--mx-bone-40); }
+.row__blend--set { color: var(--accent); border-bottom-color: var(--accent); }
+.row__blend option { background: var(--bg-deep); color: var(--text-primary); text-align: left; }
 
 .row__actions { display: flex; gap: 2px; opacity: 0; transition: opacity var(--dur-fast) var(--ease-mech); }
 .row:hover .row__actions, .row--selected .row__actions { opacity: 1; }

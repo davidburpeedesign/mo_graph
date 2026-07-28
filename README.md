@@ -49,7 +49,7 @@ directly — it is a compile, not a server.
 | noise | film grain, fbm noise |
 | diffusion | bloom, glass, anisotropic (kuwahara) |
 | artifact | block crush, bit crush, crt raster, pixel sort, rgb shift, scanlines |
-| color | levels, posterize, palette map, duotone |
+| color | levels, color balance, posterize, palette map, duotone |
 | geometry | displace |
 
 `error diffusion` ships six kernels — floyd-steinberg, atkinson, stucki,
@@ -79,6 +79,25 @@ lines go jagged without going soft — nothing is ever resampled.
 `palette map` has a `custom` mode that walks a gradient through 2–4 stops and
 samples it at N even intervals, for a controlled ramp instead of arbitrary
 swatches.
+
+`color balance` holds saturation, temperature and tint. Temperature and tint
+renormalize back to the original luma, so a colour shift never changes
+brightness — which matters here because every dither downstream quantizes on
+luma, and a temperature slider that quietly brightened the image would move the
+dither threshold with it. `preserve luma` can be switched off when you want the
+gain applied raw.
+
+## Blend modes
+
+Every chain entry has a blend mode, set inline on its row. The mode combines
+the effect's **output** with its own **input**, then `mix` interpolates that
+result back toward the input.
+
+This is what makes the destructive effects composable. `ascii`, `crt raster`
+and `halftone` replace the frame outright on `normal`; on `screen` or `overlay`
+they become a texture layer over the image they were generated from. Fourteen
+modes: normal, multiply, screen, overlay, soft light, hard light, lighten,
+darken, add, subtract, difference, exclusion, dodge, burn.
 
 Order matters, and it is most of the craft here:
 
