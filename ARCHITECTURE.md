@@ -1,12 +1,12 @@
 # mo_graph — architecture
 
-> A lightweight browser tool for dithering, noise and artifacting.
+> A lightweight browser tool for dithering, noise, diffusion and artifacting.
 > Drop an image, stack a few effects, export. One screen.
 > Chrome follows `MORPHXGEN-visual-language.md`.
 
 The target is a single-purpose tool, not an editor. Everything below is sized
-to that: **one file per effect, no build-time ceremony, and a core small enough
-to read in a sitting.**
+to that: **one file per effect, a core small enough to read in a sitting, and
+JS as the default way to write an algorithm.**
 
 ---
 
@@ -27,52 +27,93 @@ modes were doing, in one number.
 
 ---
 
-## 2. The core decision: no WebGL
+## 2. Two backends, JS first
 
-Dithering is a per-pixel operation on 8-bit RGBA. That is exactly what
-`ImageData` is. Running the whole pipeline on the CPU in plain TypeScript
-deletes the largest chunk of the previous plan — GL context management, shader
-compilation, ping-pong framebuffers, float textures, capability probing,
-GPU/CPU readback scheduling, color-space conversion nodes — and costs almost
-nothing in return.
+Effects are written in TypeScript against `ImageData` by default. That is the
+right medium for this problem: dithering is a per-pixel operation on 8-bit
+RGBA, the code reads like the algorithm it implements, and it is debuggable
+with a breakpoint instead of a screenshot.
 
-Two things make it work:
+WebGL exists as an **opt-in accelerator for the minority of effects where JS is
+genuinely too slow** — not as the pipeline everything is forced through.
 
-- **Preview at reduced resolution.** Cap the working buffer at ~1400px on the
-  long edge. A per-pixel effect over ~1.2M pixels runs in single-digit
-  milliseconds in TypeScript. A four-effect chain re-renders well inside a
-  frame. Export re-runs the same chain once at full resolution.
-- **Recompute on a rAF tick, not per input event.** Slider drags mark the chain
-  dirty; one render happens per frame at most.
+### When an effect earns a GL implementation
 
-If a specific effect turns out to be too slow (iterated diffusion is the likely
-candidate), the fix is to move *that effect* into a worker or a small GL pass —
-the effect interface below does not care which. That is a later, local change,
-not something to design around now.
+Write it in JS unless it hits one of these:
 
-**Tradeoff being made knowingly:** the pipeline works in 8-bit sRGB throughout.
-That is *correct* for dithering and posterizing, which target display levels,
-and slightly wrong for blur-type effects, which physically want linear light.
-For an aesthetic tool the difference is not visible enough to justify a float
-pipeline. Revisit only if blurs start looking muddy.
+- **Iterated.** The effect runs the same kernel tens or hundreds of times per
+  frame (reaction-diffusion, curl advection). JS cost scales with iteration
+  count and blows the frame budget immediately.
+- **Superlinear in radius.** Cost is O(radius²) per pixel rather than O(1)
+  (large-radius blur, Kuwahara/anisotropic, bloom).
+- **Measured slow.** It profiles over ~8ms on a 1400px preview. Measure before
+  assuming — most of the catalog is nowhere near this.
+
+Everything else stays JS. Ordered dithering, threshold, posterize, palette
+mapping, RGB shift, scanlines, grain and bit-crush are all single-pass O(1)
+per pixel and run in low single-digit milliseconds at preview resolution.
+Moving them to GL would trade readable code for no perceptible gain.
+
+**Error diffusion must stay JS regardless.** Floyd–Steinberg propagates
+quantization error to pixels that have not been processed yet — pixel N depends
+on pixel N-1. It is sequential by definition, and GPU approximations of it look
+wrong to anyone who knows the algorithm.
+
+### What the GL layer costs
+
+One file, `core/gl.ts`: context acquisition, a fullscreen quad, a program
+cache, a ping-pong pair of textures, upload and readback. Shaders live as
+inline template strings in the effect file that owns them, so there is no GLSL
+build plugin and no separate shader directory to keep in sync.
+
+Textures are 8-bit `RGBA/UNSIGNED_BYTE` by default, which needs no extensions
+and matches the JS path's precision exactly — the two backends produce
+interchangeable results. An effect that genuinely needs more (Gray–Scott
+accumulates tiny concentration deltas and posterizes badly at 8-bit) sets
+`float: true`, which requests a half-float target and **falls back to the
+effect's JS implementation if the extension is missing.** That is the entire
+capability story: one flag, one fallback.
+
+### Color space
+
+The pipeline works in 8-bit sRGB throughout, both backends. That is *correct*
+for dithering and posterizing, which target display levels, and slightly wrong
+for blur-type effects, which physically want linear light. For an aesthetic
+tool the difference is not visible enough to justify a float pipeline
+everywhere. Revisit only if blurs start looking muddy.
 
 ---
 
 ## 3. The effect contract
 
-This is the whole extensibility story. An effect is one file exporting one
-object. It is a pure function plus a description of its knobs.
+An effect is one file exporting one object: a description of its knobs, plus
+either a JS function or a fragment shader.
 
 ```ts
 // src/core/types.ts
 
-export interface Effect<P = any> {
-  id: string;                    // 'ordered_dither' — stable, used in URLs/presets
+export interface EffectBase {
+  id: string;                    // 'ordered_dither' — stable, used in presets/URLs
   name: string;                  // 'ordered dither' — lowercase, brand voice
-  category: 'dither' | 'noise' | 'artifact' | 'color';
+  category: 'dither' | 'noise' | 'diffusion' | 'artifact' | 'color';
   params: ParamSchema;           // drives the UI and the defaults
-  apply(src: ImageData, p: P, ctx: Ctx): ImageData;
 }
+
+export interface JsEffect extends EffectBase {
+  kind?: 'js';                   // default
+  apply(src: ImageData, p: Params, ctx: Ctx): ImageData;
+}
+
+export interface GlEffect extends EffectBase {
+  kind: 'gl';
+  fragment: string;              // inline GLSL template string
+  uniforms(p: Params, ctx: Ctx): Record<string, number | number[]>;
+  passes?: number;               // >1 for iterated effects (ping-pong)
+  float?: boolean;               // request half-float target
+  apply?(src: ImageData, p: Params, ctx: Ctx): ImageData;  // fallback path
+}
+
+export type Effect = JsEffect | GlEffect;
 
 export type Param =
   | { type: 'float'; min: number; max: number; step: number; default: number; label: string }
@@ -81,28 +122,29 @@ export type Param =
   | { type: 'bool';  default: boolean; label: string }
   | { type: 'color'; default: string; label: string };
 
-export type ParamSchema = Record<string, Param>;
-
 export interface Ctx {
   scale: number;   // preview 0..1 vs export 1 — for size-dependent effects
   seed: number;    // deterministic randomness
 }
 ```
 
-Three consequences worth noticing:
+Four consequences worth noticing:
 
-1. **Controls are generated, never written.** The inspector reads `params` and
+1. **The backend is invisible above the contract.** The chain, the UI, the
+   export path and the preset format do not know or care whether an entry is
+   JS or GL. Promoting an effect from JS to GL later is a change to one file.
+2. **Controls are generated, never written.** The inspector reads `params` and
    renders a slider, stepper, dropdown or toggle. Adding an effect never
    involves touching UI code.
-2. **`scale` keeps the preview honest.** Anything measured in pixels — halftone
+3. **`scale` keeps the preview honest.** Anything measured in pixels — halftone
    cell size, grain size, block size — multiplies by `ctx.scale` so the preview
    is a true representation of the export instead of a lie at a different
    frequency.
-3. **`seed` makes renders reproducible.** No `Math.random()` anywhere in an
-   effect; noise comes from a seeded PRNG so the export matches the preview.
+4. **`seed` makes renders reproducible.** No `Math.random()` in an effect;
+   noise comes from a seeded PRNG (and its GLSL twin) so export matches
+   preview.
 
-Adding an effect = write one file, add one line to `registry.ts`. That is the
-entire contract.
+Adding an effect = write one file, add one line to `registry.ts`.
 
 ---
 
@@ -119,36 +161,43 @@ mo_graph/
     ├── main.tsx
     ├── App.tsx                  # the one screen: canvas + chain + controls
     │
-    ├── core/                    # ~5 files, the whole engine
+    ├── core/                    # ~6 files, the whole engine
     │   ├── types.ts             # Effect, Param, ParamSchema, Ctx
     │   ├── registry.ts          # imports every effect → id-keyed map
-    │   ├── pipeline.ts          # run(chain, src, ctx) → ImageData; handles mix/enabled
+    │   ├── pipeline.ts          # run(chain, src, ctx); groups GL runs, handles mix
+    │   ├── gl.ts                # context, quad, program cache, ping-pong, readback
     │   ├── image.ts             # file → ImageData, downscale for preview, → PNG blob
-    │   └── rng.ts               # seeded PRNG
+    │   └── rng.ts               # seeded PRNG (+ matching GLSL hash in glsl.ts)
     │
     ├── effects/                 # ⭐ one file per effect
-    │   ├── lib.ts               # shared: luma, clamp, bayer matrices, palettes, nearest-color
+    │   ├── lib.ts               # shared JS: luma, clamp, bayer matrices, palettes
+    │   ├── glsl.ts              # shared GLSL snippets: hash, luma, srgb helpers
     │   │
-    │   ├── dither/
+    │   ├── dither/              # all JS
     │   │   ├── ordered.ts       # bayer 2×2…16×16
     │   │   ├── errorDiffusion.ts# floyd-steinberg / atkinson / stucki / jjn, serpentine
     │   │   ├── blueNoise.ts
     │   │   ├── halftone.ts      # dot / line / crosshatch
     │   │   └── threshold.ts
     │   │
-    │   ├── noise/
+    │   ├── noise/               # all JS
     │   │   ├── grain.ts         # luma-weighted film grain
     │   │   ├── valueNoise.ts    # fbm overlay
     │   │   └── chromaNoise.ts
     │   │
-    │   ├── artifact/
+    │   ├── diffusion/           # GL — iterated / large-radius
+    │   │   ├── reactionDiffusion.ts   # gray-scott, passes: 40+, float: true
+    │   │   ├── anisotropic.ts         # kuwahara
+    │   │   └── bloom.ts               # threshold + separable blur + add
+    │   │
+    │   ├── artifact/            # JS unless noted
     │   │   ├── blockCrush.ts    # jpeg-style block averaging + ringing
     │   │   ├── rgbShift.ts
     │   │   ├── scanlines.ts
-    │   │   ├── pixelSort.ts
+    │   │   ├── pixelSort.ts     # JS — sequential span sorting
     │   │   └── bitCrush.ts
     │   │
-    │   └── color/
+    │   └── color/               # all JS
     │       ├── palette.ts       # map to a fixed palette (incl. MORPHXGEN data scheme)
     │       ├── posterize.ts
     │       ├── levels.ts        # brightness / contrast / gamma
@@ -167,13 +216,13 @@ mo_graph/
         └── app.css              # layout; ~150 lines, no framework
 ```
 
-That is roughly **30 files**, of which 17 are effects. The core is five files.
+Roughly **35 files**, 20 of which are effects. Of those 20, **three are GL** —
+which is the ratio the backend rule is meant to produce.
 
 **Stack:** Vite + TypeScript + React. React earns its place because the
 parameter UI is genuinely a data-driven render; if bundle size matters later,
-Preact is a drop-in alias with no code changes. No state library — a single
-`useState` holding `{ source, chain, selected }` in `App.tsx` is sufficient at
-this size, and reaching for Zustand before that hurts would be premature.
+Preact is a drop-in alias. No state library — a single `useState` holding
+`{ source, chain, selected }` in `App.tsx` is sufficient at this size.
 
 ---
 
@@ -184,16 +233,30 @@ file drop
    ↓  image.ts: decode → downscale to ≤1400px → ImageData (the "source")
    ↓
 chain: [{ effectId, params, enabled, mix }, ...]
-   ↓  pipeline.ts: fold effects over the source
-   ↓     for each enabled entry: out = effect.apply(cur, params, ctx)
-   ↓                             cur = mix < 1 ? lerp(cur, out, mix) : out
+   ↓  pipeline.ts folds the chain over the source
+   ↓
+      js  js  gl  gl  js        ← chain
+      │   │   └───┬──┘  │
+      │   │    one GL group     ← consecutive GL effects share an upload
+      │   │    (upload, N       and a readback; ping-pong between them
+      │   │     draws, readback)
+      ↓   ↓       ↓      ↓
+      out = effect result; cur = mix < 1 ? lerp(cur, out, mix) : out
    ↓
 Canvas.tsx: putImageData
 ```
 
+The only scheduling rule is that **consecutive GL effects are batched**. A run
+of three GL effects costs one upload and one readback, not three of each. With
+GL effects being a small minority and usually sitting alone in a chain, this is
+about twenty lines in `pipeline.ts` — worth it because the readback is the
+expensive part, not the draws.
+
 Export is the same call with the full-resolution source and `scale: 1`, then
 `canvas.toBlob()`. There is no second code path — which is the main reason to
-keep the pipeline this plain.
+keep the pipeline this plain. GL export is bounded by `MAX_TEXTURE_SIZE`
+(≥4096 everywhere, typically 16384); above that the GL effect falls back to its
+JS path for the export render, which is slow but correct and runs once.
 
 State shape:
 
@@ -205,8 +268,8 @@ State shape:
 }
 ```
 
-The chain serializes to JSON on its own (it is just ids and numbers), so
-presets and shareable URLs are nearly free later — but neither is built in v1.
+The chain serializes to JSON on its own (ids and numbers), so presets and
+shareable URLs are nearly free later — but neither is built in v1.
 
 ---
 
@@ -250,22 +313,24 @@ Each step is independently useful and leaves the tool working.
    `ordered.ts`. Hardcode the chain to one effect. Confirm the shape is right
    before building on it.
 3. **Generated controls** — `Controls.tsx` + `Field.tsx` reading the schema.
-   This is the leverage point: every effect after this ships with a UI free.
+   The leverage point: every effect after this ships with a UI free.
 4. **The chain** — add/remove/reorder/toggle/mix.
 5. **Export** — full-res re-run, PNG download.
 6. **Brand pass** — tokens, layout, type.
+7. **JS effect fill-out** — error diffusion, halftone, grain, palette, block
+   crush, and the rest. One file at a time.
+8. **GL layer** — `gl.ts` plus the three `diffusion/` effects, once there is a
+   real chain to measure against.
 
-That is a working tool. Everything after is effects, added one file at a time:
-error diffusion → halftone → grain → palette → block crush → the rest.
+Steps 1–6 are a working tool. **GL lands last on purpose:** by then the effect
+contract has been exercised by a dozen JS effects, so the GL variant slots into
+a shape that is known to be right rather than one guessed at up front.
 
 ---
 
-## Assumption to flag
+## Open question
 
-I read "diffusion" in your original brief as **error diffusion** (the dithering
-family — Floyd–Steinberg, Atkinson, Stucki) and have scoped accordingly. If you
-meant *reaction-diffusion* — Gray–Scott patterning, iterated hundreds of times
-per frame — that single effect is genuinely GPU work and would need one small
-WebGL escape hatch inside `apply()`. It does not change anything else in this
-document, but it is the one item that would reintroduce shaders, so worth
-settling before step 2.
+`pixelSort.ts` is marked JS because span sorting is sequential per row. At
+full-resolution export on a large image it may be the slowest thing in the
+tool. If it profiles badly it does not go to GL — sorting is a poor fit — it
+goes to a Web Worker. Worth measuring at step 7 before deciding.
