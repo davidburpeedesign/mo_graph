@@ -45,17 +45,29 @@ directly — it is a compile, not a server.
 
 | category | effects |
 |---|---|
-| dither | ordered (bayer), error diffusion, halftone, threshold |
-| noise | film grain |
-| artifact | block crush, rgb shift, scanlines |
+| dither | ordered (bayer), blue noise, error diffusion, halftone, threshold |
+| noise | film grain, fbm noise |
+| diffusion | bloom, anisotropic (kuwahara) |
+| artifact | block crush, bit crush, pixel sort, rgb shift, scanlines |
 | color | levels, posterize, palette map, duotone |
+| geometry | displace |
 
 `error diffusion` ships six kernels — floyd-steinberg, atkinson, stucki,
-jarvis-judice-ninke, burkes, sierra — with serpentine scanning.
+jarvis-judice-ninke, burkes, sierra — with serpentine scanning. `blue noise`
+generates a void-and-cluster tile on first use (~100ms for 64×64, then cached).
 
-Order matters: `levels` before a dither shapes where the quantizer puts its
-edge, `film grain` before a dither breaks up banding, and either one after
-just sits on top of the result.
+Order matters, and it is most of the craft here:
+
+- `levels` **before** a dither shapes where the quantizer puts its edge.
+- `film grain` or `fbm noise` **before** a dither breaks up banding; **after**,
+  it just sits on top as speckle.
+- `bloom` **after** a dither gives the hard 1-bit highlights a halo, which is
+  the screen/lighten look the visual language describes. **Before** a dither,
+  it instead widens which areas survive thresholding.
+- `anisotropic` **before** a dither flattens detail into posterish regions, so
+  the dither has larger flat areas to work with.
+- `displace` **after** a dither drags the dither texture itself into ribbons;
+  before, it warps the source and the dither stays on the pixel grid.
 
 ## Adding an effect
 
