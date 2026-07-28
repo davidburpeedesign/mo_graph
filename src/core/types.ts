@@ -8,12 +8,25 @@
 
 export type Category = 'dither' | 'noise' | 'diffusion' | 'artifact' | 'color' | 'geometry';
 
+/**
+ * Show this control only when another parameter has one of these values.
+ * Purely a UI hint — the value is always stored and always passed to the
+ * effect, so hiding a control can never change what a chain renders.
+ */
+export interface VisibleWhen {
+  key: string;
+  equals?: (string | boolean | number)[];
+  notEquals?: (string | boolean | number)[];
+}
+
+type Common = { label: string; visibleWhen?: VisibleWhen };
+
 export type Param =
-  | { type: 'float'; min: number; max: number; step: number; default: number; label: string }
-  | { type: 'int'; min: number; max: number; default: number; label: string }
-  | { type: 'enum'; options: string[]; default: string; label: string }
-  | { type: 'bool'; default: boolean; label: string }
-  | { type: 'color'; default: string; label: string };
+  | ({ type: 'float'; min: number; max: number; step: number; default: number } & Common)
+  | ({ type: 'int'; min: number; max: number; default: number } & Common)
+  | ({ type: 'enum'; options: string[]; default: string } & Common)
+  | ({ type: 'bool'; default: boolean } & Common)
+  | ({ type: 'color'; default: string } & Common);
 
 export type ParamSchema = Record<string, Param>;
 

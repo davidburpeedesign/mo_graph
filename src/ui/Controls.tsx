@@ -32,15 +32,24 @@ export function Controls({ entry, onChange }: Props) {
       </div>
       <p className="controls__desc muted">{effect.description}</p>
 
-      {Object.entries(effect.params).map(([key, param]) => (
-        <Field
-          key={key}
-          name={key}
-          param={param}
-          value={entry.params[key] ?? param.default}
-          onChange={(v) => setParam(key, v)}
-        />
-      ))}
+      {Object.entries(effect.params)
+        .filter(([, param]) => {
+          const cond = param.visibleWhen;
+          if (!cond) return true;
+          const v = entry.params[cond.key] as string | boolean | number;
+          if (cond.equals && !cond.equals.includes(v)) return false;
+          if (cond.notEquals && cond.notEquals.includes(v)) return false;
+          return true;
+        })
+        .map(([key, param]) => (
+          <Field
+            key={key}
+            name={key}
+            param={param}
+            value={entry.params[key] ?? param.default}
+            onChange={(v) => setParam(key, v)}
+          />
+        ))}
 
       <div className="controls__foot">
         <div className="field">
