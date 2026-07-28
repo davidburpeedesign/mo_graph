@@ -1,8 +1,8 @@
 /** Shared primitives for JS effects. */
 
-import { hash2, makeRng } from '../core/rng';
+import { hash2, hashUint, makeRng } from '../core/rng';
 
-export { makeRng, hash2 };
+export { makeRng, hash2, hashUint };
 
 export function cloneImageData(src: ImageData): ImageData {
   const out = new ImageData(src.width, src.height);
@@ -399,6 +399,184 @@ export function blueNoiseTile(n: number, seed = 1): Float32Array {
 
   const out = new Float32Array(N);
   for (let i = 0; i < N; i++) out[i] = (rank[i] + 0.5) / N;
+  return out;
+}
+
+/** Blur along one axis only — for directional frost and streak effects. */
+export function blurAxisRGB(
+  buf: Float32Array,
+  w: number,
+  h: number,
+  radius: number,
+  horizontal: boolean,
+  passes = 3,
+): Float32Array {
+  if (radius < 1) return buf;
+  let src: Float32Array = buf;
+  let dst: Float32Array = new Float32Array(buf.length);
+  for (let p = 0; p < passes; p++) {
+    boxPass(src, dst, w, h, radius, horizontal);
+    const t = src;
+    src = dst;
+    dst = t;
+  }
+  return src as Float32Array<ArrayBuffer>;
+}
+
+/* ── noise fields ───────────────────────────────────────────────────── */
+
+const fade = (t: number) => t * t * t * (t * (t * 6 - 15) + 10);
+
+/** Perlin gradient noise, 0..1. Smoother and less blocky than value noise. */
+export function perlin2(x: number, y: number, seed: number): number {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const xf = x - xi;
+  const yf = y - yi;
+
+  // 8 evenly spaced gradient directions, picked by hash.
+  const dot = (gx: number, gy: number, dx: number, dy: number) => gx * dx + gy * dy;
+  const grad = (hx: number, hy: number, dx: number, dy: number) => {
+    const a = (hashUint(hx, hy, seed) & 7) * (Math.PI / 4);
+    return dot(Math.cos(a), Math.sin(a), dx, dy);
+  };
+
+  const u = fade(xf);
+  const v = fade(yf);
+
+  const n00 = grad(xi, yi, xf, yf);
+  const n10 = grad(xi + 1, yi, xf - 1, yf);
+  const n01 = grad(xi, yi + 1, xf, yf - 1);
+  const n11 = grad(xi + 1, yi + 1, xf - 1, yf - 1);
+
+  const top = n00 + (n10 - n00) * u;
+  const bot = n01 + (n11 - n01) * u;
+  // Perlin's range is roughly ±0.707; rescale into 0..1.
+  return clamp((top + (bot - top) * v) * 0.7071 + 0.5, 0, 1);
+}
+
+/**
+ * Worley / cellular noise. Returns the two nearest feature-point distances.
+ * F1 alone gives blobs; F2-F1 gives the cell-edge webbing that reads as
+ * scales — which is what Houdini's "alligator" noise looks like.
+ */
+export function worley2(x: number, y: number, seed: number): [number, number] {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  let f1 = Infinity;
+  let f2 = Infinity;
+
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const cx = xi + dx;
+      const cy = yi + dy;
+      const px = cx + hash2(cx, cy, seed);
+      const py = cy + hash2(cx, cy, seed ^ 0x68bc21eb);
+      const d = Math.hypot(px - x, py - y);
+      if (d < f1) {
+        f2 = f1;
+        f1 = d;
+      } else if (d < f2) {
+        f2 = d;
+      }
+    }
+  }
+  return [f1, f2];
+}
+
+export type NoiseType = 'value' | 'perlin' | 'ridged' | 'cellular' | 'alligator';
+
+export const NOISE_TYPES: NoiseType[] = ['value', 'perlin', 'ridged', 'cellular', 'alligator'];
+
+function noiseOctave(type: NoiseType, x: number, y: number, seed: number): number {
+  switch (type) {
+    case 'perlin':
+      return perlin2(x, y, seed);
+    case 'ridged': {
+      // Invert the absolute deviation from mid, so peaks become sharp ridges.
+      const n = perlin2(x, y, seed);
+      return 1 - Math.abs(n * 2 - 1);
+    }
+    case 'cellular':
+      return clamp(worley2(x, y, seed)[0], 0, 1);
+    case 'alligator': {
+      const [f1, f2] = worley2(x, y, seed);
+      return clamp((f2 - f1) * 1.4, 0, 1);
+    }
+    default:
+      return valueNoise(x, y, seed);
+  }
+}
+
+/** Fractal sum of any noise type, normalized to 0..1. */
+export function noiseField(
+  type: NoiseType,
+  x: number,
+  y: number,
+  seed: number,
+  octaves: number,
+  gain = 0.5,
+): number {
+  let sum = 0;
+  let amp = 1;
+  let total = 0;
+  let fx = x;
+  let fy = y;
+
+  for (let o = 0; o < octaves; o++) {
+    sum += noiseOctave(type, fx, fy, seed + o * 7919) * amp;
+    total += amp;
+    amp *= gain;
+    fx *= 2;
+    fy *= 2;
+  }
+  return sum / total;
+}
+
+/**
+ * Curl of a scalar noise field, as a normalized 2D vector.
+ *
+ * Curl fields are divergence-free, so displacing along one swirls the image
+ * without the pinching and pooling that an arbitrary vector field produces.
+ */
+export function curlNoise(
+  x: number,
+  y: number,
+  seed: number,
+  octaves: number,
+  out: [number, number],
+): void {
+  const e = 0.35;
+  const n = (px: number, py: number) => noiseField('perlin', px, py, seed, octaves);
+
+  const dx = (n(x, y + e) - n(x, y - e)) / (2 * e);
+  const dy = -(n(x + e, y) - n(x - e, y)) / (2 * e);
+
+  const len = Math.hypot(dx, dy) || 1;
+  out[0] = dx / len;
+  out[1] = dy / len;
+}
+
+/** Sample `steps` evenly spaced colours along a multi-stop gradient. */
+export function gradientPalette(stops: [number, number, number][], steps: number): Palette {
+  if (stops.length === 0) return PALETTES.mono;
+  if (stops.length === 1) return [stops[0]];
+
+  const out: Palette = [];
+  const segs = stops.length - 1;
+
+  for (let i = 0; i < steps; i++) {
+    const t = steps === 1 ? 0 : (i / (steps - 1)) * segs;
+    const s = Math.min(segs - 1, Math.floor(t));
+    const f = t - s;
+    const a = stops[s];
+    const b = stops[s + 1];
+    out.push([
+      Math.round(a[0] + (b[0] - a[0]) * f),
+      Math.round(a[1] + (b[1] - a[1]) * f),
+      Math.round(a[2] + (b[2] - a[2]) * f),
+    ]);
+  }
   return out;
 }
 

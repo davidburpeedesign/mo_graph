@@ -45,16 +45,40 @@ directly — it is a compile, not a server.
 
 | category | effects |
 |---|---|
-| dither | ordered (bayer), blue noise, error diffusion, halftone, threshold |
+| dither | ordered (bayer), blue noise, error diffusion, halftone, threshold, ascii |
 | noise | film grain, fbm noise |
-| diffusion | bloom, anisotropic (kuwahara) |
-| artifact | block crush, bit crush, pixel sort, rgb shift, scanlines |
+| diffusion | bloom, glass, anisotropic (kuwahara) |
+| artifact | block crush, bit crush, crt raster, pixel sort, rgb shift, scanlines |
 | color | levels, posterize, palette map, duotone |
 | geometry | displace |
 
 `error diffusion` ships six kernels — floyd-steinberg, atkinson, stucki,
 jarvis-judice-ninke, burkes, sierra — with serpentine scanning. `blue noise`
 generates a void-and-cluster tile on first use (~100ms for 64×64, then cached).
+
+`glass` is fluted glass: each rib refracts like a cylindrical lens, and frost
+blurs only *along* the ribs, because blurring across them would wash out the
+seams that make it read as glass.
+
+`crt raster` draws evenly spaced lines whose position is pushed sideways by
+local brightness. It rasterizes forward — background fill, then each segment
+stamped as whole pixels — so lines stay hard-edged at any displacement.
+
+`ascii` uses an embedded 5×7 bitmap font rather than canvas text, so effects
+stay pure functions over `ImageData` with no font-loading race. Its low/high
+thresholds gate which cells become type; the rest pass the source through, so
+you can put glyphs into only the shadows or only the highlights.
+
+`displace` offers six noise fields — value, perlin, ridged, cellular,
+alligator (worley F2−F1, the scaly one) and curl. Curl is the only field that
+cannot pool or pinch, because a divergence-free field has no sources or sinks.
+
+`scanlines` can warp. The offset is **rounded to a whole pixel** before use, so
+lines go jagged without going soft — nothing is ever resampled.
+
+`palette map` has a `custom` mode that walks a gradient through 2–4 stops and
+samples it at N even intervals, for a controlled ramp instead of arbitrary
+swatches.
 
 Order matters, and it is most of the craft here:
 
@@ -96,6 +120,11 @@ export const myEffect: JsEffect = {
 
 Then add it to `EFFECTS` in `src/core/registry.ts`. Controls are generated from
 `params`, so there is no UI work.
+
+A parameter may carry `visibleWhen: { key, equals }` or `{ key, notEquals }` to
+hide a control unless another parameter has a given value. It is a UI hint
+only — the value is always stored and always passed to the effect, so hiding a
+control can never change what a chain renders.
 
 Two rules for the `ctx` argument:
 

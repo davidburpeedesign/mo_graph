@@ -16,6 +16,8 @@ export const levels: JsEffect = {
   params: {
     brightness: { type: 'float', min: -1, max: 1, step: 0.01, default: 0, label: 'brightness' },
     contrast: { type: 'float', min: -1, max: 1, step: 0.01, default: 0, label: 'contrast' },
+    shadows: { type: 'float', min: -1, max: 1, step: 0.01, default: 0, label: 'shadows' },
+    highlights: { type: 'float', min: -1, max: 1, step: 0.01, default: 0, label: 'highlights' },
     gamma: { type: 'float', min: 0.1, max: 4, step: 0.01, default: 1, label: 'gamma' },
     saturation: { type: 'float', min: 0, max: 2, step: 0.01, default: 1, label: 'saturation' },
     invert: { type: 'bool', default: false, label: 'invert' },
@@ -24,6 +26,8 @@ export const levels: JsEffect = {
   apply(src, p) {
     const brightness = (p.brightness as number) * 255;
     const contrast = p.contrast as number;
+    const shadows = p.shadows as number;
+    const highlights = p.highlights as number;
     const gamma = p.gamma as number;
     const saturation = p.saturation as number;
     const invert = p.invert as boolean;
@@ -35,6 +39,21 @@ export const levels: JsEffect = {
     for (let v = 0; v < 256; v++) {
       let x = v + brightness;
       x = (x - 128) * slope + 128;
+
+      /**
+       * Shadows and highlights are weighted lifts, not curve reshapes: each
+       * acts through a mask that falls off toward the opposite end of the
+       * range, so lifting shadows leaves the highlights where they are. The
+       * squared falloff keeps the two from meeting in the midtones and
+       * cancelling.
+       */
+      if (shadows !== 0 || highlights !== 0) {
+        const t = Math.min(1, Math.max(0, x / 255));
+        const shadowMask = (1 - t) * (1 - t);
+        const highlightMask = t * t;
+        x += shadows * 127 * shadowMask + highlights * 127 * highlightMask;
+      }
+
       x = 255 * Math.pow(Math.max(0, x) / 255, 1 / gamma);
       if (invert) x = 255 - x;
       lut[v] = clamp255(x);

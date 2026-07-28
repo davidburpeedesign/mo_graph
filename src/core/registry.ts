@@ -1,5 +1,6 @@
 import type { Category, Effect } from './types';
 
+import { ascii } from '../effects/dither/ascii';
 import { blueNoise } from '../effects/dither/blueNoise';
 import { errorDiffusion } from '../effects/dither/errorDiffusion';
 import { halftone } from '../effects/dither/halftone';
@@ -11,9 +12,11 @@ import { valueNoiseEffect } from '../effects/noise/valueNoise';
 
 import { anisotropic } from '../effects/diffusion/anisotropic';
 import { bloom } from '../effects/diffusion/bloom';
+import { glass } from '../effects/diffusion/glass';
 
 import { bitCrush } from '../effects/artifact/bitCrush';
 import { blockCrush } from '../effects/artifact/blockCrush';
+import { crtRaster } from '../effects/artifact/crtRaster';
 import { pixelSort } from '../effects/artifact/pixelSort';
 import { rgbShift } from '../effects/artifact/rgbShift';
 import { scanlines } from '../effects/artifact/scanlines';
@@ -35,15 +38,18 @@ export const EFFECTS: Effect[] = [
   errorDiffusion,
   halftone,
   threshold,
+  ascii,
 
   grain,
   valueNoiseEffect,
 
   bloom,
+  glass,
   anisotropic,
 
   blockCrush,
   bitCrush,
+  crtRaster,
   pixelSort,
   rgbShift,
   scanlines,

@@ -22,9 +22,13 @@ export function makeRng(seed: number): () => number {
  * on where it is, not on how many pixels were visited first. That keeps grain
  * stable when the image is re-rendered at a different resolution.
  */
-export function hash2(x: number, y: number, seed: number): number {
+export function hashUint(x: number, y: number, seed: number): number {
   let h = Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(y | 0, 0x165667b1) ^ Math.imul(seed | 0, 0x9e3779b9);
   h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
   h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+export function hash2(x: number, y: number, seed: number): number {
+  return hashUint(x, y, seed) / 4294967296;
 }
