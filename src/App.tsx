@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChainEntry } from './core/types';
+import type { BlendMode, ChainEntry } from './core/types';
 import { defaultParams } from './core/types';
 import { getEffect } from './core/registry';
 import { runChain, timed } from './core/pipeline';
@@ -75,6 +75,7 @@ export function App() {
       effectId,
       params: defaultParams(effect.params),
       enabled: true,
+      blend: 'normal',
       mix: 1,
       seed: (Math.random() * 1e9) | 0,
     };
@@ -203,6 +204,9 @@ export function App() {
               setChain((c) => c.map((e) => (e.uid === uid ? { ...e, enabled: !e.enabled } : e)))
             }
             onMove={move}
+            onBlend={(uid, blend: BlendMode) =>
+              setChain((c) => c.map((e) => (e.uid === uid ? { ...e, blend } : e)))
+            }
             onSavePreset={savePreset}
             onLoadPreset={loadPreset}
           />

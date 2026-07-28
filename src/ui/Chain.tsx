@@ -1,5 +1,6 @@
-import type { ChainEntry } from '../core/types';
+import type { BlendMode, ChainEntry } from '../core/types';
 import { getEffect } from '../core/registry';
+import { BLEND_MODES, blendLabel } from '../core/blend';
 
 interface Props {
   chain: ChainEntry[];
@@ -8,6 +9,7 @@ interface Props {
   onRemove: (uid: string) => void;
   onToggle: (uid: string) => void;
   onMove: (uid: string, delta: number) => void;
+  onBlend: (uid: string, blend: BlendMode) => void;
   onSavePreset: () => void;
   onLoadPreset: (file: File) => void;
 }
@@ -25,6 +27,7 @@ export function Chain({
   onRemove,
   onToggle,
   onMove,
+  onBlend,
   onSavePreset,
   onLoadPreset,
 }: Props) {
@@ -64,6 +67,20 @@ export function Chain({
               <span className="row__name">{effect.name}</span>
 
               {entry.mix < 1 && <span className="row__mix">{Math.round(entry.mix * 100)}%</span>}
+
+              <select
+                className={`row__blend${entry.blend !== 'normal' ? ' row__blend--set' : ''}`}
+                value={entry.blend}
+                title="blend mode"
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => onBlend(entry.uid, e.target.value as BlendMode)}
+              >
+                {BLEND_MODES.map((m) => (
+                  <option key={m} value={m}>
+                    {blendLabel(m)}
+                  </option>
+                ))}
+              </select>
 
               <span className="row__actions">
                 <button

@@ -1,6 +1,7 @@
-import type { ChainEntry, Param, ParamSchema, Params } from '../core/types';
+import type { BlendMode, ChainEntry, Param, ParamSchema, Params } from '../core/types';
 import { defaultParams } from '../core/types';
 import { getEffect } from '../core/registry';
+import { BLEND_MODES } from '../core/blend';
 
 export const PRESET_FORMAT = 'mo_graph.preset';
 export const PRESET_VERSION = 1;
@@ -9,6 +10,7 @@ export interface PresetEntry {
   effectId: string;
   params: Params;
   enabled: boolean;
+  blend: BlendMode;
   mix: number;
   seed: number;
 }
@@ -25,10 +27,11 @@ export function exportPreset(chain: ChainEntry[]): Preset {
     format: PRESET_FORMAT,
     version: PRESET_VERSION,
     created: new Date().toISOString(),
-    chain: chain.map(({ effectId, params, enabled, mix, seed }) => ({
+    chain: chain.map(({ effectId, params, enabled, blend, mix, seed }) => ({
       effectId,
       params,
       enabled,
+      blend,
       mix,
       seed,
     })),
@@ -116,6 +119,12 @@ export function importPreset(raw: unknown): ImportResult {
       effectId: effect.id,
       params: coerceParams(effect.params, entry.params),
       enabled: typeof entry.enabled === 'boolean' ? entry.enabled : true,
+      // Presets written before blend modes existed simply have no key here,
+      // and normal is the mode that reproduces their original render.
+      blend:
+        typeof entry.blend === 'string' && (BLEND_MODES as string[]).includes(entry.blend)
+          ? (entry.blend as BlendMode)
+          : 'normal',
       mix: typeof entry.mix === 'number' && Number.isFinite(entry.mix) ? clampNum(entry.mix, 0, 1) : 1,
       seed:
         typeof entry.seed === 'number' && Number.isFinite(entry.seed)

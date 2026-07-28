@@ -21,6 +21,7 @@ import { pixelSort } from '../effects/artifact/pixelSort';
 import { rgbShift } from '../effects/artifact/rgbShift';
 import { scanlines } from '../effects/artifact/scanlines';
 
+import { colorBalance } from '../effects/color/colorBalance';
 import { duotone } from '../effects/color/duotone';
 import { levels } from '../effects/color/levels';
 import { palette } from '../effects/color/palette';
@@ -55,6 +56,7 @@ export const EFFECTS: Effect[] = [
   scanlines,
 
   levels,
+  colorBalance,
   posterize,
   palette,
   duotone,

@@ -1,5 +1,5 @@
 import type { JsEffect } from '../../core/types';
-import { clamp255, luma } from '../lib';
+import { clamp255 } from '../lib';
 
 /**
  * Brightness / contrast / gamma / saturation.
@@ -19,7 +19,6 @@ export const levels: JsEffect = {
     shadows: { type: 'float', min: -1, max: 1, step: 0.01, default: 0, label: 'shadows' },
     highlights: { type: 'float', min: -1, max: 1, step: 0.01, default: 0, label: 'highlights' },
     gamma: { type: 'float', min: 0.1, max: 4, step: 0.01, default: 1, label: 'gamma' },
-    saturation: { type: 'float', min: 0, max: 2, step: 0.01, default: 1, label: 'saturation' },
     invert: { type: 'bool', default: false, label: 'invert' },
   },
 
@@ -29,7 +28,6 @@ export const levels: JsEffect = {
     const shadows = p.shadows as number;
     const highlights = p.highlights as number;
     const gamma = p.gamma as number;
-    const saturation = p.saturation as number;
     const invert = p.invert as boolean;
 
     // Standard contrast slope: -1 flattens to mid gray, +1 approaches a step.
@@ -64,20 +62,9 @@ export const levels: JsEffect = {
     const O = out.data;
 
     for (let i = 0; i < O.length; i += 4) {
-      let r = lut[S[i]];
-      let g = lut[S[i + 1]];
-      let b = lut[S[i + 2]];
-
-      if (saturation !== 1) {
-        const l = luma(r, g, b);
-        r = clamp255(l + (r - l) * saturation);
-        g = clamp255(l + (g - l) * saturation);
-        b = clamp255(l + (b - l) * saturation);
-      }
-
-      O[i] = r;
-      O[i + 1] = g;
-      O[i + 2] = b;
+      O[i] = lut[S[i]];
+      O[i + 1] = lut[S[i + 1]];
+      O[i + 2] = lut[S[i + 2]];
       O[i + 3] = S[i + 3];
     }
     return out;
