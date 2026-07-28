@@ -1,24 +1,33 @@
 import type { ChainEntry } from '../core/types';
 import { getEffect } from '../core/registry';
-import { AddEffect } from './AddEffect';
 
 interface Props {
   chain: ChainEntry[];
   selected: string | null;
   onSelect: (uid: string) => void;
-  onAdd: (effectId: string) => void;
   onRemove: (uid: string) => void;
   onToggle: (uid: string) => void;
   onMove: (uid: string, delta: number) => void;
+  onSavePreset: () => void;
+  onLoadPreset: (file: File) => void;
 }
 
 /**
- * The effect chain, bottom entry applied first. Reordering is by explicit
+ * The effect chain, top entry applied first. Reordering is by explicit
  * up/down controls rather than drag — order matters enormously here (a dither
  * before a levels adjustment is a different image than after), and discrete
  * steps make that relationship easier to explore than dragging does.
  */
-export function Chain({ chain, selected, onSelect, onAdd, onRemove, onToggle, onMove }: Props) {
+export function Chain({
+  chain,
+  selected,
+  onSelect,
+  onRemove,
+  onToggle,
+  onMove,
+  onSavePreset,
+  onLoadPreset,
+}: Props) {
   return (
     <div className="chain">
       <div className="chain__head">
@@ -27,7 +36,7 @@ export function Chain({ chain, selected, onSelect, onAdd, onRemove, onToggle, on
       </div>
 
       <div className="chain__list">
-        {chain.length === 0 && <p className="muted chain__empty">no effects</p>}
+        {chain.length === 0 && <p className="muted chain__empty">pick an effect from the library</p>}
 
         {chain.map((entry, i) => {
           const effect = getEffect(entry.effectId);
@@ -92,7 +101,24 @@ export function Chain({ chain, selected, onSelect, onAdd, onRemove, onToggle, on
         })}
       </div>
 
-      <AddEffect onAdd={onAdd} />
+      <div className="chain__presets">
+        <button className="btn btn--ghost" disabled={chain.length === 0} onClick={onSavePreset}>
+          save settings
+        </button>
+        <label className="btn btn--ghost">
+          load settings
+          <input
+            type="file"
+            accept="application/json,.json"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) onLoadPreset(f);
+              e.target.value = '';
+            }}
+          />
+        </label>
+      </div>
     </div>
   );
 }
