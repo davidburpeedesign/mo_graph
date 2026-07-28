@@ -21,9 +21,18 @@ rendering. Images are decoded and processed in the tab and never uploaded.
 `dist/` is therefore a plain static folder that any host will serve.
 
 `.github/workflows/deploy.yml` builds and publishes to GitHub Pages on every
-push to `main`. It needs Pages switched on once:
+push to `main`. The Pages source must be:
 
 > **Settings → Pages → Build and deployment → Source: GitHub Actions**
+
+**Not** "Deploy from a branch". That setting runs GitHub's legacy Jekyll
+builder against the repo *root*, which publishes the dev `index.html` — a
+`<script type="module" src="/src/main.tsx">` that no browser can execute —
+and then overwrites this workflow's deploy a few seconds after it lands. The
+symptom is a blank page with two green checkmarks, which is a confusing thing
+to debug. `configure-pages` is set to `enablement: true` to correct the source
+automatically, and `.nojekyll` ships in the artifact so Jekyll never processes
+the build.
 
 After that the site lives at `https://<owner>.github.io/mo_graph/`. Vite is
 configured with `base: './'`, so the same build works at a domain root, in a
