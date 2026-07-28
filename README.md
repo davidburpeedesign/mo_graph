@@ -10,8 +10,27 @@ system.
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm run build      # typecheck + production bundle
+npm run build      # typecheck + production bundle → dist/
+npm run preview    # serve the built bundle locally
 ```
+
+## Deploying
+
+The tool is entirely client-side — no backend, no API, no server-side
+rendering. Images are decoded and processed in the tab and never uploaded.
+`dist/` is therefore a plain static folder that any host will serve.
+
+`.github/workflows/deploy.yml` builds and publishes to GitHub Pages on every
+push to `main`. It needs Pages switched on once:
+
+> **Settings → Pages → Build and deployment → Source: GitHub Actions**
+
+After that the site lives at `https://<owner>.github.io/mo_graph/`. Vite is
+configured with `base: './'`, so the same build works at a domain root, in a
+project subpath, or from `npm run preview` without rebuilding.
+
+The build step exists only because browsers cannot execute TypeScript or JSX
+directly — it is a compile, not a server.
 
 ## Effects
 
