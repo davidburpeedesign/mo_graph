@@ -24,10 +24,86 @@ button, input, select, label { font: inherit; letter-spacing: inherit; color: in
 
 .main {
   display: grid;
-  grid-template-columns: 1fr 360px;
+  grid-template-columns: 232px 1fr 344px;
   flex: 1;
   min-height: 0;
 }
+
+@media (max-width: 1200px) {
+  .main { grid-template-columns: 200px 1fr 300px; }
+}
+
+/* ── library ────────────────────────────────────────────────────────── */
+
+.library {
+  display: flex;
+  flex-direction: column;
+  border-right: var(--border-hair);
+  min-height: 0;
+}
+
+.library__head {
+  display: flex;
+  justify-content: space-between;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: var(--border-hair);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--ls-ui);
+  color: var(--text-muted);
+  flex: none;
+}
+
+.library__filter {
+  flex: none;
+  margin: var(--sp-3) var(--sp-4);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--bg-deep);
+  border: var(--border-hair);
+  border-radius: var(--radius-0);
+  font-size: var(--fs-micro);
+  color: var(--text-primary);
+}
+.library__filter::placeholder { color: var(--text-faint); }
+
+.library__list { overflow-y: auto; flex: 1; min-height: 0; padding-bottom: var(--sp-4); }
+
+.library__group { margin-bottom: var(--sp-2); }
+
+.library__cat {
+  padding: var(--sp-2) var(--sp-4) var(--sp-1);
+  font-size: 12px;
+  letter-spacing: var(--ls-ui);
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.library__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--sp-2) var(--sp-4);
+  background: none;
+  border: none;
+  border-left: var(--bw-mark) solid transparent;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-mech),
+              border-color var(--dur-fast) var(--ease-mech);
+}
+.library__item:hover { background: var(--surface-raise); border-left-color: var(--accent); }
+
+.library__name { display: block; font-size: var(--fs-micro); color: var(--text-primary); }
+.library__desc {
+  display: block;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.library__item:hover .library__name { color: var(--text-emphasis); }
+
+.library__empty { padding: var(--sp-4); font-size: var(--fs-micro); }
 
 /* ── toolbar ────────────────────────────────────────────────────────── */
 
@@ -95,25 +171,35 @@ button, input, select, label { font: inherit; letter-spacing: inherit; color: in
 /* ── canvas ─────────────────────────────────────────────────────────── */
 
 .canvas {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-deep);
+  overflow: hidden;
+}
+
+/* Scroll container: at >100% the image overflows and this is what pans. */
+.canvas__view {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
   display: grid;
   place-items: center;
-  padding: var(--sp-7);
-  min-width: 0;
-  overflow: hidden;
-  background: var(--bg-deep);
+  padding: var(--sp-5);
+  scrollbar-width: thin;
+  scrollbar-color: var(--mx-bone-24) transparent;
 }
 
-.canvas__frame { position: relative; max-width: 100%; max-height: 100%; line-height: 0; }
+.canvas__view::-webkit-scrollbar { width: 10px; height: 10px; }
+.canvas__view::-webkit-scrollbar-track { background: transparent; }
+.canvas__view::-webkit-scrollbar-thumb { background: var(--mx-bone-16); }
+.canvas__view::-webkit-scrollbar-thumb:hover { background: var(--mx-bone-40); }
 
-.canvas canvas {
-  display: block;
-  max-width: 100%;
-  /* Account for the canvas padding so tall images still fit. */
-  max-height: calc(100vh - var(--nav-h) - var(--sp-8) - var(--sp-7));
-  object-fit: contain;
-  /* Dithering is the product — never let the browser smooth it away. */
-  image-rendering: pixelated;
-}
+.canvas__view--dragging { cursor: grabbing; }
+
+.canvas__frame { position: relative; line-height: 0; flex: none; }
+
+.canvas canvas { display: block; }
 
 /* corner-tick bracket — the signature frame motif */
 .tick { position: absolute; width: var(--tick-len); height: var(--tick-len); pointer-events: none; }
@@ -123,6 +209,47 @@ button, input, select, label { font: inherit; letter-spacing: inherit; color: in
 .tick--br { bottom: -5px; right: -5px; border-bottom: var(--bw-mark) solid var(--mx-bone-40); border-right: var(--bw-mark) solid var(--mx-bone-40); }
 
 .canvas__empty { text-align: center; color: var(--text-muted); line-height: var(--lh-body); }
+
+/* ── zoom controls ──────────────────────────────────────────────────── */
+
+.zoom {
+  position: absolute;
+  left: var(--sp-4);
+  bottom: var(--sp-4);
+  display: flex;
+  align-items: stretch;
+  background: var(--bg);
+  border: var(--border-hair);
+}
+
+.zoom button {
+  min-width: 28px;
+  padding: var(--sp-1) var(--sp-2);
+  background: none;
+  border: none;
+  border-right: 1px solid var(--line-soft);
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-mech);
+}
+.zoom button:last-child { border-right: none; }
+.zoom button:hover { color: var(--text-emphasis); }
+
+.zoom__level { min-width: 56px; font-variant-numeric: tabular-nums; }
+.zoom__fit--on { color: var(--accent); }
+
+/* ── preset bar ─────────────────────────────────────────────────────── */
+
+.chain__presets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: var(--border-hair);
+  flex: none;
+}
+.chain__presets .btn { justify-content: center; cursor: pointer; }
 
 /* ── panel ──────────────────────────────────────────────────────────── */
 
@@ -186,49 +313,6 @@ button, input, select, label { font: inherit; letter-spacing: inherit; color: in
 }
 .row__actions button:hover:not(:disabled) { color: var(--text-emphasis); }
 .row__actions button:disabled { color: var(--mx-bone-12); cursor: default; }
-
-/* ── add effect ─────────────────────────────────────────────────────── */
-
-.add { position: relative; padding: var(--sp-3) var(--sp-4); }
-.btn--add { width: 100%; justify-content: center; border-style: dashed; }
-
-/**
- * Opens downward over the controls panel. Opening upward runs off the top of
- * the window, because the chain sits at the top of the panel — there is never
- * enough room above the button for a full-height menu.
- */
-.add__menu {
-  position: absolute;
-  left: var(--sp-4);
-  right: var(--sp-4);
-  top: calc(100% - var(--sp-2));
-  max-height: 50vh;
-  overflow-y: auto;
-  background: var(--bg-deep);
-  border: var(--border-hair);
-  z-index: 10;
-}
-
-.add__group { border-bottom: 1px solid var(--line-soft); }
-.add__cat {
-  padding: var(--sp-2) var(--sp-3);
-  font-size: 12px;
-  letter-spacing: var(--ls-ui);
-  color: var(--text-faint);
-}
-
-.add__item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: var(--sp-2) var(--sp-3);
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-.add__item:hover { background: var(--surface-raise); }
-.add__name { display: block; font-size: var(--fs-micro); }
-.add__desc { display: block; font-size: 12px; color: var(--text-faint); line-height: var(--lh-body); }
 
 /* ── controls ───────────────────────────────────────────────────────── */
 

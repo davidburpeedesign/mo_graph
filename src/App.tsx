@@ -4,9 +4,11 @@ import { defaultParams } from './core/types';
 import { getEffect } from './core/registry';
 import { runChain, timed } from './core/pipeline';
 import { download, downscale, fileToImageData, previewScale, toBlob } from './core/image';
+import { exportPreset, importPreset, presetToBlob } from './io/preset';
 import { Canvas } from './ui/Canvas';
 import { Chain } from './ui/Chain';
 import { Controls } from './ui/Controls';
+import { Library } from './ui/Library';
 import { Toolbar } from './ui/Toolbar';
 
 interface Source {
@@ -114,10 +116,36 @@ export function App() {
     }
   };
 
+  const savePreset = () => {
+    const preset = exportPreset(chain);
+    const base = source?.name.replace(/\.[^.]+$/, '') ?? 'mograph';
+    download(presetToBlob(preset), `${base}_settings.json`);
+    setStatus(`saved ${chain.length} effect${chain.length === 1 ? '' : 's'}`);
+  };
+
+  const loadPreset = async (file: File) => {
+    try {
+      const { chain: loaded, warnings } = importPreset(JSON.parse(await file.text()));
+      setChain(loaded.map((e) => ({ ...e, uid: nextUid() })));
+      setSelected(null);
+      setStatus(
+        `loaded ${loaded.length} effect${loaded.length === 1 ? '' : 's'}` +
+          (warnings.length ? ` · ${warnings.length} skipped` : ''),
+      );
+      if (warnings.length) console.warn('preset warnings:', warnings);
+    } catch (err) {
+      setStatus(err instanceof Error ? `load failed: ${err.message}` : 'load failed');
+    }
+  };
+
   // Hold space to compare against the untouched source.
   useEffect(() => {
+    const isTyping = (t: EventTarget | null) => {
+      const el = t as HTMLElement | null;
+      return el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.tagName === 'SELECT';
+    };
     const down = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !e.repeat && (e.target as HTMLElement)?.tagName !== 'INPUT') {
+      if (e.code === 'Space' && !e.repeat && !isTyping(e.target)) {
         e.preventDefault();
         setComparing(true);
       }
@@ -144,12 +172,17 @@ export function App() {
         canExport={!!source}
         onOpen={open}
         onExport={exportImage}
-        onReset={() => setChain([])}
+        onReset={() => {
+          setChain([]);
+          setSelected(null);
+        }}
         onCompareDown={() => setComparing(true)}
         onCompareUp={() => setComparing(false)}
       />
 
       <main className="main">
+        <Library onAdd={addEffect} />
+
         <Canvas
           image={rendered}
           original={source?.preview ?? null}
@@ -162,7 +195,6 @@ export function App() {
             chain={chain}
             selected={selected}
             onSelect={setSelected}
-            onAdd={addEffect}
             onRemove={(uid) => {
               setChain((c) => c.filter((e) => e.uid !== uid));
               if (selected === uid) setSelected(null);
@@ -171,6 +203,8 @@ export function App() {
               setChain((c) => c.map((e) => (e.uid === uid ? { ...e, enabled: !e.enabled } : e)))
             }
             onMove={move}
+            onSavePreset={savePreset}
+            onLoadPreset={loadPreset}
           />
           <Controls entry={selectedEntry} onChange={patchSelected} />
         </aside>

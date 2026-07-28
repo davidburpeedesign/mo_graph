@@ -105,6 +105,25 @@ Two rules for the `ctx` argument:
 - **Use `ctx.seed`, never `Math.random()`.** Renders must be reproducible or the
   export will not match the preview.
 
-## Keyboard
+## Settings presets
+
+`save settings` writes the whole chain — effect order, every parameter, mix,
+enabled state and seeds — to a `.json` file. `load settings` replays it onto
+whatever image is open, which is how you keep a look consistent across a set.
+
+Seeds travel with the preset, so stochastic effects reproduce exactly rather
+than re-rolling per image.
+
+Preset files are plain JSON and safe to hand-edit. Every value is validated on
+load against the effect's schema: unknown effects are skipped with a warning,
+out-of-range numbers clamp, and bad types fall back to defaults — a malformed
+file degrades rather than breaking the render.
+
+## Keyboard and canvas
 
 - `space` (hold) — compare against the unprocessed source
+- `ctrl`/`cmd` + scroll — zoom around the cursor
+- drag — pan, once magnified past the window
+- `fit` never magnifies past 100%, so the dither pattern is always shown at
+  true pixel scale or smaller. Above 100% the canvas renders nearest-neighbour;
+  below, it resamples so the pattern does not alias into moiré.
