@@ -44,8 +44,13 @@ Write it in JS unless it hits one of these:
 - **Iterated.** The effect runs the same kernel tens or hundreds of times per
   frame (reaction-diffusion, curl advection). JS cost scales with iteration
   count and blows the frame budget immediately.
-- **Superlinear in radius.** Cost is O(radius²) per pixel rather than O(1)
-  (large-radius blur, Kuwahara/anisotropic, bloom).
+- **Superlinear in radius, with no summed-area trick available.** Naive
+  large-radius work is O(radius²) per pixel — but check first, because the
+  usual suspects turn out not to qualify. A separable box blur with a running
+  sum is O(1) per pixel at *any* radius, and Kuwahara over integral images is
+  O(1) per quadrant. Both `bloom` and `anisotropic` were planned as GL for
+  this reason and both shipped as JS once the constant-time formulation was
+  used. Measured: radius 120 bloom costs the same as radius 2.
 - **Measured slow.** It profiles over ~8ms on a 1400px preview. Measure before
   assuming — most of the catalog is nowhere near this.
 
@@ -185,10 +190,10 @@ mo_graph/
     │   │   ├── valueNoise.ts    # fbm overlay
     │   │   └── chromaNoise.ts
     │   │
-    │   ├── diffusion/           # GL — iterated / large-radius
-    │   │   ├── reactionDiffusion.ts   # gray-scott, passes: 40+, float: true
-    │   │   ├── anisotropic.ts         # kuwahara
-    │   │   └── bloom.ts               # threshold + separable blur + add
+    │   ├── diffusion/
+    │   │   ├── bloom.ts               # JS — threshold + running-sum box blur
+    │   │   ├── anisotropic.ts         # JS — kuwahara over integral images
+    │   │   └── reactionDiffusion.ts   # GL — gray-scott, passes: 40+, float: true
     │   │
     │   ├── artifact/            # JS unless noted
     │   │   ├── blockCrush.ts    # jpeg-style block averaging + ringing
@@ -216,8 +221,11 @@ mo_graph/
         └── app.css              # layout; ~150 lines, no framework
 ```
 
-Roughly **35 files**, 20 of which are effects. Of those 20, **three are GL** —
-which is the ratio the backend rule is meant to produce.
+Roughly **35 files**, 20 of which are effects. As built, **19 are JS and none
+are GL yet** — the backend rule was expected to push about three onto the GPU,
+but two of those three (`bloom`, `anisotropic`) turned out to have constant-time
+formulations. Only `reactionDiffusion`, which is genuinely iterative, still
+needs the GL layer.
 
 **Stack:** Vite + TypeScript + React. React earns its place because the
 parameter UI is genuinely a data-driven render; if bundle size matters later,
@@ -319,8 +327,8 @@ Each step is independently useful and leaves the tool working.
 6. **Brand pass** — tokens, layout, type.
 7. **JS effect fill-out** — error diffusion, halftone, grain, palette, block
    crush, and the rest. One file at a time.
-8. **GL layer** — `gl.ts` plus the three `diffusion/` effects, once there is a
-   real chain to measure against.
+8. **GL layer** — `gl.ts` plus `reactionDiffusion`, the one effect that cannot
+   be made constant-time in JS. Only worth building when that effect is wanted.
 
 Steps 1–6 are a working tool. **GL lands last on purpose:** by then the effect
 contract has been exercised by a dozen JS effects, so the GL variant slots into

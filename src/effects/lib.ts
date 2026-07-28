@@ -1,6 +1,8 @@
 /** Shared primitives for JS effects. */
 
-export { makeRng, hash2 } from '../core/rng';
+import { hash2, makeRng } from '../core/rng';
+
+export { makeRng, hash2 };
 
 export function cloneImageData(src: ImageData): ImageData {
   const out = new ImageData(src.width, src.height);
@@ -154,4 +156,259 @@ export function nearestColor(pal: Palette, r: number, g: number, b: number): [nu
  */
 export function scaled(px: number, scale: number): number {
   return Math.max(1, Math.round(px * scale));
+}
+
+/** Pack an ImageData's RGB into a float buffer for multi-pass work. */
+export function toFloatRGB(src: ImageData): Float32Array {
+  const out = new Float32Array(src.width * src.height * 3);
+  const S = src.data;
+  for (let i = 0, j = 0; j < out.length; i += 4, j += 3) {
+    out[j] = S[i];
+    out[j + 1] = S[i + 1];
+    out[j + 2] = S[i + 2];
+  }
+  return out;
+}
+
+/**
+ * Separable box blur, run `passes` times.
+ *
+ * Uses a running sum, so cost per pixel is constant regardless of radius —
+ * a 200px blur costs the same as a 2px one. Three passes approximate a
+ * gaussian closely enough that the difference is invisible at 8-bit.
+ *
+ * This is why the blur-driven effects stayed in JS: the O(radius²) argument
+ * for putting them on the GPU does not apply to a running-sum box blur.
+ */
+export function blurRGB(buf: Float32Array, w: number, h: number, radius: number, passes = 3): Float32Array {
+  if (radius < 1) return buf;
+  let src = buf;
+  let dst = new Float32Array(buf.length);
+
+  for (let p = 0; p < passes; p++) {
+    boxPass(src, dst, w, h, radius, true);
+    boxPass(dst, src, w, h, radius, false);
+  }
+  return src;
+}
+
+function boxPass(
+  src: Float32Array,
+  dst: Float32Array,
+  w: number,
+  h: number,
+  r: number,
+  horizontal: boolean,
+): void {
+  const lines = horizontal ? h : w;
+  const len = horizontal ? w : h;
+  const step = horizontal ? 3 : w * 3;
+  const norm = 1 / (2 * r + 1);
+  const clampI = (i: number) => (i < 0 ? 0 : i >= len ? len - 1 : i);
+
+  for (let line = 0; line < lines; line++) {
+    const base = horizontal ? line * w * 3 : line * 3;
+    for (let c = 0; c < 3; c++) {
+      let sum = 0;
+      for (let i = -r; i <= r; i++) sum += src[base + clampI(i) * step + c];
+
+      for (let i = 0; i < len; i++) {
+        dst[base + i * step + c] = sum * norm;
+        sum += src[base + clampI(i + r + 1) * step + c] - src[base + clampI(i - r) * step + c];
+      }
+    }
+  }
+}
+
+/** Smooth-interpolated value noise, 0..1. */
+export function valueNoise(x: number, y: number, seed: number): number {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const xf = x - xi;
+  const yf = y - yi;
+  // Smoothstep the interpolant, otherwise the lattice grid is visible.
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+
+  const a = hash2(xi, yi, seed);
+  const b = hash2(xi + 1, yi, seed);
+  const c = hash2(xi, yi + 1, seed);
+  const d = hash2(xi + 1, yi + 1, seed);
+
+  const top = a + (b - a) * u;
+  const bot = c + (d - c) * u;
+  return top + (bot - top) * v;
+}
+
+/** Fractal brownian motion over value noise, normalized to 0..1. */
+export function fbm(x: number, y: number, seed: number, octaves: number, gain = 0.5): number {
+  let sum = 0;
+  let amp = 1;
+  let total = 0;
+  let fx = x;
+  let fy = y;
+
+  for (let o = 0; o < octaves; o++) {
+    sum += valueNoise(fx, fy, seed + o * 7919) * amp;
+    total += amp;
+    amp *= gain;
+    fx *= 2;
+    fy *= 2;
+  }
+  return sum / total;
+}
+
+/** Bilinear sample of an ImageData at fractional coordinates. */
+export function sampleBilinear(
+  S: Uint8ClampedArray,
+  w: number,
+  h: number,
+  x: number,
+  y: number,
+  out: [number, number, number],
+): void {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = x - x0;
+  const fy = y - y0;
+
+  const cx0 = clamp(x0, 0, w - 1);
+  const cy0 = clamp(y0, 0, h - 1);
+  const cx1 = clamp(x0 + 1, 0, w - 1);
+  const cy1 = clamp(y0 + 1, 0, h - 1);
+
+  const i00 = (cy0 * w + cx0) * 4;
+  const i10 = (cy0 * w + cx1) * 4;
+  const i01 = (cy1 * w + cx0) * 4;
+  const i11 = (cy1 * w + cx1) * 4;
+
+  for (let c = 0; c < 3; c++) {
+    const top = S[i00 + c] + (S[i10 + c] - S[i00 + c]) * fx;
+    const bot = S[i01 + c] + (S[i11 + c] - S[i01 + c]) * fx;
+    out[c] = top + (bot - top) * fy;
+  }
+}
+
+/**
+ * Void-and-cluster blue noise tile, values 0..1.
+ *
+ * Blue noise has no low-frequency content, so using it as a dither threshold
+ * scatters error at frequencies the eye is least sensitive to. The result
+ * looks like fine even grain rather than Bayer's visible crosshatch, without
+ * error diffusion's serial cost.
+ *
+ * Generation is O(n^4) in the tile edge, so tiles are small and cached. A
+ * 64x64 tile takes a few hundred ms once, then never again.
+ */
+export function blueNoiseTile(n: number, seed = 1): Float32Array {
+  const N = n * n;
+  const sigma = 1.5;
+  const kr = 6;
+
+  const kernel: number[] = [];
+  for (let dy = -kr; dy <= kr; dy++) {
+    for (let dx = -kr; dx <= kr; dx++) {
+      kernel.push(Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma)));
+    }
+  }
+
+  const energy = new Float32Array(N);
+
+  // Wrap-around splat: the tile must be seamless when repeated.
+  const splat = (idx: number, sign: number) => {
+    const x = idx % n;
+    const y = (idx / n) | 0;
+    let k = 0;
+    for (let dy = -kr; dy <= kr; dy++) {
+      const yy = (((y + dy) % n) + n) % n;
+      for (let dx = -kr; dx <= kr; dx++, k++) {
+        const xx = (((x + dx) % n) + n) % n;
+        energy[yy * n + xx] += sign * kernel[k];
+      }
+    }
+  };
+
+  const tightestCluster = (mask: Uint8Array) => {
+    let best = -Infinity;
+    let at = -1;
+    for (let i = 0; i < N; i++) if (mask[i] && energy[i] > best) ((best = energy[i]), (at = i));
+    return at;
+  };
+  const largestVoid = (mask: Uint8Array) => {
+    let worst = Infinity;
+    let at = -1;
+    for (let i = 0; i < N; i++) if (!mask[i] && energy[i] < worst) ((worst = energy[i]), (at = i));
+    return at;
+  };
+
+  // Seed with a sparse random pattern.
+  const rng = makeRng(seed);
+  const count = Math.max(1, Math.round(N * 0.1));
+  const pool = Array.from({ length: N }, (_, i) => i);
+  const ones = new Uint8Array(N);
+  for (let i = 0; i < count; i++) {
+    const j = i + ((rng() * (N - i)) | 0);
+    const t = pool[i];
+    pool[i] = pool[j];
+    pool[j] = t;
+    ones[pool[i]] = 1;
+    splat(pool[i], 1);
+  }
+
+  // Relax it until moving the tightest cluster into the largest void is a no-op.
+  for (let guard = 0; guard < N * 4; guard++) {
+    const tc = tightestCluster(ones);
+    ones[tc] = 0;
+    splat(tc, -1);
+    const lv = largestVoid(ones);
+    if (lv === tc) {
+      ones[tc] = 1;
+      splat(tc, 1);
+      break;
+    }
+    ones[lv] = 1;
+    splat(lv, 1);
+  }
+
+  const initial = ones.slice();
+  const rank = new Int32Array(N).fill(-1);
+
+  // Phase 1 — strip ones out, ranking them count-1 down to 0.
+  {
+    const mask = initial.slice();
+    for (let r = count - 1; r >= 0; r--) {
+      const tc = tightestCluster(mask);
+      mask[tc] = 0;
+      splat(tc, -1);
+      rank[tc] = r;
+    }
+  }
+
+  // Phase 2 — fill voids back in, ranking count up to N-1.
+  {
+    const mask = initial.slice();
+    energy.fill(0);
+    for (let i = 0; i < N; i++) if (mask[i]) splat(i, 1);
+    for (let r = count; r < N; r++) {
+      const lv = largestVoid(mask);
+      mask[lv] = 1;
+      splat(lv, 1);
+      rank[lv] = r;
+    }
+  }
+
+  const out = new Float32Array(N);
+  for (let i = 0; i < N; i++) out[i] = (rank[i] + 0.5) / N;
+  return out;
+}
+
+const blueNoiseCache = new Map<number, Float32Array>();
+
+export function getBlueNoise(size: number): Float32Array {
+  let t = blueNoiseCache.get(size);
+  if (!t) {
+    t = blueNoiseTile(size);
+    blueNoiseCache.set(size, t);
+  }
+  return t;
 }

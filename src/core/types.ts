@@ -6,7 +6,7 @@
  * all read from this and nothing else.
  */
 
-export type Category = 'dither' | 'noise' | 'diffusion' | 'artifact' | 'color';
+export type Category = 'dither' | 'noise' | 'diffusion' | 'artifact' | 'color' | 'geometry';
 
 export type Param =
   | { type: 'float'; min: number; max: number; step: number; default: number; label: string }
