@@ -1,463 +1,271 @@
-# mo_graph — system outline
+# mo_graph — architecture
 
-> A browser-based image processing tool for dithering, noise, diffusion and
-> artifacting. Load an image, stack effects non-destructively, export.
-> Shell and chrome follow `MORPHXGEN-visual-language.md` exactly.
+> A lightweight browser tool for dithering, noise and artifacting.
+> Drop an image, stack a few effects, export. One screen.
+> Chrome follows `MORPHXGEN-visual-language.md`.
 
-This document is the architectural plan: what gets built, where every file
-lives, and what contract holds it together. No code has been written yet —
-this is the map that comes first.
-
----
-
-## 1. Product shape
-
-A single-page editor with three regions:
-
-- **Canvas** — the live render of the effect stack, pan/zoom, before/after split.
-- **Stack** — an ordered list of effect layers. Each has a toggle, opacity,
-  blend mode, and optional mask. Reorderable. This is the core interaction.
-- **Inspector** — parameter controls for the selected layer, generated
-  automatically from that effect's parameter schema.
-
-Plus an export dialog, a preset browser, and a document sidebar for source
-image swapping.
-
-Everything runs client-side. No server, no upload, no account. The tool is a
-static bundle; images never leave the machine. That constraint is worth
-holding onto — it makes the tool trivially deployable and privacy-safe by
-construction.
+The target is a single-purpose tool, not an editor. Everything below is sized
+to that: **one file per effect, no build-time ceremony, and a core small enough
+to read in a sitting.**
 
 ---
 
-## 2. Stack decisions
+## 1. Scope
 
-| Concern | Choice | Why |
-|---|---|---|
-| Build | Vite + TypeScript | Fast HMR, first-class GLSL and worker imports |
-| UI | React 18 | Component model matches the MORPHXGEN design-system inventory already specified |
-| State | Zustand + Immer | Small, un-opinionated, easy to snapshot for undo/redo |
-| GPU | WebGL2 | Universally available; float render targets via `EXT_color_buffer_float` |
-| CPU passes | Web Worker + (later) WASM | Error diffusion is inherently sequential and does not belong on the GPU |
-| Shaders | `.glsl` files + `vite-plugin-glsl` | `#include` support so effects share a common GLSL library |
-| Persistence | IndexedDB (documents), JSON (presets) | Large image blobs need IDB; presets should be copy-pasteable text |
+**In:** load an image, apply an ordered chain of effects, tune parameters live,
+export a PNG. Effects are the product; everything else is plumbing that should
+stay out of the way.
 
-**WebGPU is deliberately not the initial target.** It buys compute shaders
-(useful for pixel sorting and reaction-diffusion) but costs universal support.
-The renderer is written behind a backend interface so a WebGPU path can be
-added later without touching a single effect definition.
+**Out, deliberately:** layer blend modes, masks, undo/redo history, document
+persistence, tiled export, multi-image projects, a design-system component
+library. Each of those is a week of work that makes the dithering no better.
+
+**The one concession to "stacking":** the chain is a flat ordered list, and each
+entry has an enable toggle and a single `mix` slider (0–1, blends the effect's
+output back toward its input). That covers most of what layer opacity and blend
+modes were doing, in one number.
 
 ---
 
-## 3. Rendering architecture
+## 2. The core decision: no WebGL
 
-### 3.1 The hybrid problem
+Dithering is a per-pixel operation on 8-bit RGBA. That is exactly what
+`ImageData` is. Running the whole pipeline on the CPU in plain TypeScript
+deletes the largest chunk of the previous plan — GL context management, shader
+compilation, ping-pong framebuffers, float textures, capability probing,
+GPU/CPU readback scheduling, color-space conversion nodes — and costs almost
+nothing in return.
 
-Most effects here are embarrassingly parallel — ordered dithering, noise,
-chroma shift, posterize — and belong in a fragment shader. But **error
-diffusion is not**. Floyd–Steinberg propagates quantization error to
-not-yet-processed neighbors; pixel N depends on pixel N-1. Faking it on the
-GPU produces something that looks wrong to anyone who knows the algorithm.
+Two things make it work:
 
-So the pipeline supports two pass kinds, and the effect declares which it is:
+- **Preview at reduced resolution.** Cap the working buffer at ~1400px on the
+  long edge. A per-pixel effect over ~1.2M pixels runs in single-digit
+  milliseconds in TypeScript. A four-effect chain re-renders well inside a
+  frame. Export re-runs the same chain once at full resolution.
+- **Recompute on a rAF tick, not per input event.** Slider drags mark the chain
+  dirty; one render happens per frame at most.
 
-- `gpu` — a fragment shader over a full-screen quad. Default.
-- `cpu` — a function over an `ImageData`-shaped buffer, run in a worker.
+If a specific effect turns out to be too slow (iterated diffusion is the likely
+candidate), the fix is to move *that effect* into a worker or a small GL pass —
+the effect interface below does not care which. That is a later, local change,
+not something to design around now.
 
-The scheduler groups consecutive GPU passes into a single ping-pong chain and
-only reads back to CPU when a `cpu` pass appears, then re-uploads. A stack of
-eight GPU effects costs one readback at export time, not eight.
-
-### 3.2 Pass flow
-
-```
-source image
-    ↓ decode → RGBA16F linear texture
-    ↓
-  [layer 1] ─ gpu pass ─┐
-  [layer 2] ─ gpu pass ─┤ ping-pong FBO chain (no readback)
-  [layer 3] ─ gpu pass ─┘
-    ↓ readback
-  [layer 4] ─ cpu pass (worker, error diffusion)
-    ↓ upload
-  [layer 5] ─ gpu pass
-    ↓
-  compositor (blend each layer result against its input, per layer opacity/mask)
-    ↓
-  view transform (linear → sRGB, exposure, zoom) → canvas
-```
-
-### 3.3 Color space
-
-The working buffer is **linear-light RGBA16F**. This is correct for blurs,
-blooms and diffusion, which are physically averaging operations and look wrong
-in gamma space.
-
-But quantizing effects are the opposite: dithering and posterizing target
-*display* levels, so they must run in sRGB. Each effect therefore declares
-`colorSpace: 'linear' | 'srgb'`, and the pass scheduler inserts
-decode/encode nodes automatically. Consecutive effects in the same space cost
-nothing; the conversion is only emitted at a boundary.
-
-This single field prevents the most common class of bug in tools like this —
-a dither pattern that subtly shifts brightness because the quantizer ran
-against linear values.
-
-### 3.4 Resolution and export
-
-The canvas renders a **preview-resolution** proxy (capped, e.g. 2048px on the
-long edge) for interactive editing. Export re-runs the identical pipeline at
-full resolution, tiled if the image exceeds max texture size, with an overlap
-margin for effects that sample neighbors.
-
-Effects declare `neighborhood: number` (in pixels, at scale 1) so the tiler
-knows how much overlap to allocate. Effects that are resolution-dependent —
-halftone cell size, grain size — declare `scaleWithResolution: true` so the
-preview matches the export instead of showing a lie.
+**Tradeoff being made knowingly:** the pipeline works in 8-bit sRGB throughout.
+That is *correct* for dithering and posterizing, which target display levels,
+and slightly wrong for blur-type effects, which physically want linear light.
+For an aesthetic tool the difference is not visible enough to justify a float
+pipeline. Revisit only if blurs start looking muddy.
 
 ---
 
-## 4. The effect contract
+## 3. The effect contract
 
-This is the extensibility seam. Every effect is a self-describing module. The
-UI, the serializer, and the scheduler all read from the same manifest — adding
-an effect means adding one folder and one registry line, and controls appear
-for free.
+This is the whole extensibility story. An effect is one file exporting one
+object. It is a pure function plus a description of its knobs.
 
 ```ts
-// src/effects/types.ts  (sketch)
+// src/core/types.ts
 
-export interface EffectDefinition<P extends ParamValues = ParamValues> {
-  id: string;                  // 'dither.ordered_bayer' — stable, serialized
-  name: string;                // 'ordered / bayer' — lowercase, brand voice
-  category: EffectCategory;    // 'dither' | 'noise' | 'diffusion' | ...
-  description: string;
+export interface Effect<P = any> {
+  id: string;                    // 'ordered_dither' — stable, used in URLs/presets
+  name: string;                  // 'ordered dither' — lowercase, brand voice
+  category: 'dither' | 'noise' | 'artifact' | 'color';
+  params: ParamSchema;           // drives the UI and the defaults
+  apply(src: ImageData, p: P, ctx: Ctx): ImageData;
+}
 
-  params: ParamSchema<P>;      // drives both UI and defaults
-  colorSpace: 'linear' | 'srgb';
-  neighborhood?: number;       // px of neighbor sampling, for tiling overlap
-  scaleWithResolution?: boolean;
+export type Param =
+  | { type: 'float'; min: number; max: number; step: number; default: number; label: string }
+  | { type: 'int';   min: number; max: number; default: number; label: string }
+  | { type: 'enum';  options: string[]; default: string; label: string }
+  | { type: 'bool';  default: boolean; label: string }
+  | { type: 'color'; default: string; label: string };
 
-  backend:
-    | { kind: 'gpu'; fragment: string; uniforms(p: P, ctx: PassContext): UniformMap;
-        passes?: number }      // >1 for multi-pass (e.g. separable blur)
-    | { kind: 'cpu'; run(src: Float32Array, dst: Float32Array,
-                         w: number, h: number, p: P): void };
+export type ParamSchema = Record<string, Param>;
+
+export interface Ctx {
+  scale: number;   // preview 0..1 vs export 1 — for size-dependent effects
+  seed: number;    // deterministic randomness
 }
 ```
 
-Parameter schema entries carry everything the inspector needs: type, range,
-step, default, unit, and an optional `dependsOn` for conditional visibility
-(e.g. palette size only shows when palette mode is `custom`).
+Three consequences worth noticing:
 
-```ts
-params: {
-  levels:   { type: 'int',    min: 2, max: 32, step: 1, default: 4, label: 'levels' },
-  matrix:   { type: 'enum',   options: ['2x2','4x4','8x8','16x16'], default: '8x8' },
-  strength: { type: 'float',  min: 0, max: 2, step: 0.01, default: 1, label: 'strength' },
-  serpentine: { type: 'bool', default: true, dependsOn: { matrix: '!=2x2' } },
-}
-```
+1. **Controls are generated, never written.** The inspector reads `params` and
+   renders a slider, stepper, dropdown or toggle. Adding an effect never
+   involves touching UI code.
+2. **`scale` keeps the preview honest.** Anything measured in pixels — halftone
+   cell size, grain size, block size — multiplies by `ctx.scale` so the preview
+   is a true representation of the export instead of a lie at a different
+   frequency.
+3. **`seed` makes renders reproducible.** No `Math.random()` anywhere in an
+   effect; noise comes from a seeded PRNG so the export matches the preview.
+
+Adding an effect = write one file, add one line to `registry.ts`. That is the
+entire contract.
 
 ---
 
-## 5. Folder structure
+## 4. Folder structure
 
 ```
 mo_graph/
-├── MORPHXGEN-visual-language.md    # brand source of truth (existing)
-├── ARCHITECTURE.md                 # this file
-├── README.md
+├── MORPHXGEN-visual-language.md
+├── ARCHITECTURE.md
 ├── index.html
 ├── package.json
-├── tsconfig.json
 ├── vite.config.ts
-├── public/
-│   ├── samples/                    # bundled test images
-│   └── noise/
-│       └── blue-noise-256.png      # precomputed void-and-cluster tile
 └── src/
     ├── main.tsx
-    ├── app/
-    │   ├── App.tsx                 # three-region shell
-    │   ├── shortcuts.ts            # keyboard map
-    │   └── bootstrap.ts            # engine init, capability probe, error boundary
+    ├── App.tsx                  # the one screen: canvas + chain + controls
     │
-    ├── engine/                     # rendering core — knows nothing about specific effects
-    │   ├── index.ts
-    │   ├── Renderer.ts             # top-level: document in, canvas out
-    │   ├── gl/
-    │   │   ├── context.ts          # WebGL2 acquisition, extension checks
-    │   │   ├── capabilities.ts     # float targets, max texture size, precision
-    │   │   ├── Program.ts          # compile/link/cache, uniform introspection
-    │   │   ├── Framebuffer.ts
-    │   │   ├── PingPongTarget.ts   # double-buffered RGBA16F pair
-    │   │   ├── textures.ts         # upload, sampler config, LUT helpers
-    │   │   └── quad.ts             # the one VAO everything draws with
-    │   ├── pipeline/
-    │   │   ├── Pipeline.ts         # builds a pass list from the layer stack
-    │   │   ├── PassScheduler.ts    # GPU/CPU grouping, colorspace node insertion
-    │   │   ├── compositor.ts       # per-layer blend + opacity + mask
-    │   │   ├── blendModes.glsl     # normal, screen, lighten, multiply, overlay…
-    │   │   └── colorSpace.ts       # linear ⇄ sRGB transfer functions
-    │   ├── cpu/
-    │   │   ├── CpuPassHost.ts      # dispatch to worker, transferable buffers
-    │   │   ├── effect.worker.ts    # worker entry; imports cpu effect fns
-    │   │   └── transfer.ts         # Float32 ⇄ texture marshalling
-    │   ├── tiling/
-    │   │   ├── TileRenderer.ts     # full-res export in overlapping tiles
-    │   │   └── bounds.ts
-    │   └── sources/
-    │       ├── bayer.ts            # generate ordered matrices 2×2…16×16
-    │       ├── blueNoise.ts        # load/sample the precomputed tile
-    │       └── rng.ts              # deterministic seeded PRNG (repeatable renders)
+    ├── core/                    # ~5 files, the whole engine
+    │   ├── types.ts             # Effect, Param, ParamSchema, Ctx
+    │   ├── registry.ts          # imports every effect → id-keyed map
+    │   ├── pipeline.ts          # run(chain, src, ctx) → ImageData; handles mix/enabled
+    │   ├── image.ts             # file → ImageData, downscale for preview, → PNG blob
+    │   └── rng.ts               # seeded PRNG
     │
-    ├── effects/                    # ⭐ all effects live here, one folder each
-    │   ├── registry.ts             # imports every effect, exports the map
-    │   ├── types.ts                # EffectDefinition, ParamSchema, PassContext
-    │   ├── defineEffect.ts         # typed identity helper for authoring
-    │   ├── shared/
-    │   │   ├── lib.glsl            # srgb<->linear, luma, hash, remap
-    │   │   ├── sampling.glsl       # texel fetch helpers, wrap modes
-    │   │   ├── noise.glsl          # value/perlin/simplex/curl
-    │   │   └── palette.ts          # palette definitions + nearest-color search
+    ├── effects/                 # ⭐ one file per effect
+    │   ├── lib.ts               # shared: luma, clamp, bayer matrices, palettes, nearest-color
     │   │
     │   ├── dither/
-    │   │   ├── index.ts            # re-exports the category
-    │   │   ├── ordered-bayer/      { index.ts, bayer.frag.glsl }
-    │   │   ├── blue-noise/         { index.ts, blueNoise.frag.glsl }
-    │   │   ├── error-diffusion/    { index.ts, kernels.ts, diffuse.cpu.ts }
-    │   │   ├── halftone/           { index.ts, halftone.frag.glsl }
-    │   │   ├── threshold/          { index.ts, threshold.frag.glsl }
-    │   │   └── ascii/              { index.ts, ascii.frag.glsl, atlas.ts }
+    │   │   ├── ordered.ts       # bayer 2×2…16×16
+    │   │   ├── errorDiffusion.ts# floyd-steinberg / atkinson / stucki / jjn, serpentine
+    │   │   ├── blueNoise.ts
+    │   │   ├── halftone.ts      # dot / line / crosshatch
+    │   │   └── threshold.ts
     │   │
     │   ├── noise/
-    │   │   ├── index.ts
-    │   │   ├── film-grain/         { index.ts, grain.frag.glsl }
-    │   │   ├── fbm/                { index.ts, fbm.frag.glsl }
-    │   │   ├── chroma-noise/       { index.ts, chromaNoise.frag.glsl }
-    │   │   └── dust-scratches/     { index.ts, dust.frag.glsl }
-    │   │
-    │   ├── diffusion/
-    │   │   ├── index.ts
-    │   │   ├── reaction-diffusion/ { index.ts, grayScott.frag.glsl }   # multi-pass
-    │   │   ├── anisotropic/        { index.ts, kuwahara.frag.glsl }
-    │   │   ├── curl-advect/        { index.ts, advect.frag.glsl }
-    │   │   └── bloom/              { index.ts, downsample.frag.glsl, upsample.frag.glsl }
+    │   │   ├── grain.ts         # luma-weighted film grain
+    │   │   ├── valueNoise.ts    # fbm overlay
+    │   │   └── chromaNoise.ts
     │   │
     │   ├── artifact/
-    │   │   ├── index.ts
-    │   │   ├── block-dct/          { index.ts, dct.frag.glsl }         # jpeg-style
-    │   │   ├── chroma-subsample/   { index.ts, subsample.frag.glsl }
-    │   │   ├── datamosh/           { index.ts, mosh.frag.glsl }
-    │   │   ├── pixel-sort/         { index.ts, sort.cpu.ts }           # CPU
-    │   │   ├── rgb-shift/          { index.ts, rgbShift.frag.glsl }
-    │   │   ├── scanlines/          { index.ts, scanlines.frag.glsl }
-    │   │   └── bit-crush/          { index.ts, bitCrush.frag.glsl }
+    │   │   ├── blockCrush.ts    # jpeg-style block averaging + ringing
+    │   │   ├── rgbShift.ts
+    │   │   ├── scanlines.ts
+    │   │   ├── pixelSort.ts
+    │   │   └── bitCrush.ts
     │   │
-    │   ├── color/
-    │   │   ├── index.ts
-    │   │   ├── palette-map/        { index.ts, paletteMap.frag.glsl }
-    │   │   ├── posterize/          { index.ts, posterize.frag.glsl }
-    │   │   ├── levels/             { index.ts, levels.frag.glsl }
-    │   │   └── duotone/            { index.ts, duotone.frag.glsl }
-    │   │
-    │   └── geometry/
-    │       ├── index.ts
-    │       ├── displace/           { index.ts, displace.frag.glsl }
-    │       ├── warp/               { index.ts, warp.frag.glsl }
-    │       └── tile-mirror/        { index.ts, tileMirror.frag.glsl }
+    │   └── color/
+    │       ├── palette.ts       # map to a fixed palette (incl. MORPHXGEN data scheme)
+    │       ├── posterize.ts
+    │       ├── levels.ts        # brightness / contrast / gamma
+    │       └── duotone.ts
     │
-    ├── state/
-    │   ├── document.ts             # source image, canvas size, metadata
-    │   ├── stack.ts                # layers: add/remove/reorder/toggle/params
-    │   ├── selection.ts
-    │   ├── history.ts              # undo/redo over serialized snapshots
-    │   ├── viewport.ts             # zoom, pan, before/after split
-    │   └── types.ts
-    │
-    ├── ui/
-    │   ├── design-system/          # MORPHXGEN components, per §7 of the brand doc
-    │   │   ├── tokens.css          # verbatim from the visual language file
-    │   │   ├── Button.tsx  CornerFrame.tsx  Tag.tsx
-    │   │   ├── Logo.tsx  Wordmark.tsx
-    │   │   ├── NavBar.tsx  ScrollCue.tsx
-    │   │   ├── GridRule.tsx  RenderFrame.tsx
-    │   │   └── StatusReadout.tsx
-    │   ├── canvas/
-    │   │   ├── CanvasView.tsx       # the <canvas> + pan/zoom + split handle
-    │   │   └── ViewportControls.tsx
-    │   ├── stack/
-    │   │   ├── LayerStack.tsx       # ordered list, drag to reorder
-    │   │   ├── LayerRow.tsx
-    │   │   └── AddEffectMenu.tsx    # grouped by category, from the registry
-    │   ├── inspector/
-    │   │   ├── Inspector.tsx        # renders controls from a ParamSchema
-    │   │   └── controls/            { Slider, IntStepper, EnumCells, Toggle,
-    │   │                              ColorField, CurveEditor, SeedField }
-    │   ├── export/
-    │   │   └── ExportDialog.tsx
-    │   └── presets/
-    │       └── PresetBrowser.tsx
-    │
-    ├── io/
-    │   ├── import.ts               # file/drop/paste → decoded bitmap
-    │   ├── export.ts               # full-res render → PNG/WebP/JPEG blob
-    │   ├── serialize.ts            # document ⇄ JSON (.mograph)
-    │   └── storage.ts              # IndexedDB persistence
-    │
-    ├── presets/
-    │   ├── index.ts
-    │   └── *.json                  # shipped starting points
+    ├── ui/                      # ~6 components, no design-system layer
+    │   ├── Canvas.tsx           # renders ImageData, fit-to-view, before/after hold
+    │   ├── Chain.tsx            # ordered list: reorder, toggle, mix, remove
+    │   ├── AddEffect.tsx        # grouped dropdown, built from the registry
+    │   ├── Controls.tsx         # generates inputs from a ParamSchema
+    │   ├── Field.tsx            # slider / stepper / select / toggle / swatch
+    │   └── Toolbar.tsx          # open, export, reset
     │
     └── styles/
-        ├── reset.css
-        └── global.css
+        ├── tokens.css           # copied verbatim from the visual language doc
+        └── app.css              # layout; ~150 lines, no framework
 ```
 
-### Where effects live, in one sentence
+That is roughly **30 files**, of which 17 are effects. The core is five files.
 
-`src/effects/<category>/<effect-name>/` — each effect folder holds an
-`index.ts` exporting a single `EffectDefinition`, plus its `.frag.glsl` shader
-(GPU effects) or `.cpu.ts` implementation (CPU effects). Nothing else in the
-codebase needs to know it exists except one import line in
-`src/effects/registry.ts`.
-
----
-
-## 6. Effect catalog
-
-Effect ids follow the brand's file-handle naming: lowercase, underscored,
-namespaced by category.
-
-**dither** — `ordered_bayer`, `blue_noise`, `error_diffusion`
-(Floyd–Steinberg / Jarvis–Judice–Ninke / Stucki / Atkinson / Sierra, selected
-by kernel param, serpentine toggle), `halftone` (dot / line / crosshatch),
-`threshold`, `ascii`.
-
-**noise** — `film_grain` (luma-weighted, so it sits in shadows the way real
-grain does), `fbm`, `chroma_noise`, `dust_scratches`.
-
-**diffusion** — `reaction_diffusion` (Gray–Scott, iterated multi-pass),
-`anisotropic` (Kuwahara), `curl_advect`, `bloom`.
-
-**artifact** — `block_dct` (JPEG-style blocking and ringing),
-`chroma_subsample`, `datamosh`, `pixel_sort`, `rgb_shift`, `scanlines`,
-`bit_crush`.
-
-**color** — `palette_map` (nearest-color against a palette, including the
-MORPHXGEN data scheme), `posterize`, `levels`, `duotone`.
-
-**geometry** — `displace`, `warp`, `tile_mirror`.
-
-`error_diffusion` and `pixel_sort` are the two CPU-backed effects. Everything
-else is a fragment shader.
+**Stack:** Vite + TypeScript + React. React earns its place because the
+parameter UI is genuinely a data-driven render; if bundle size matters later,
+Preact is a drop-in alias with no code changes. No state library — a single
+`useState` holding `{ source, chain, selected }` in `App.tsx` is sufficient at
+this size, and reaching for Zustand before that hurts would be premature.
 
 ---
 
-## 7. State model
+## 5. Data flow
+
+```
+file drop
+   ↓  image.ts: decode → downscale to ≤1400px → ImageData (the "source")
+   ↓
+chain: [{ effectId, params, enabled, mix }, ...]
+   ↓  pipeline.ts: fold effects over the source
+   ↓     for each enabled entry: out = effect.apply(cur, params, ctx)
+   ↓                             cur = mix < 1 ? lerp(cur, out, mix) : out
+   ↓
+Canvas.tsx: putImageData
+```
+
+Export is the same call with the full-resolution source and `scale: 1`, then
+`canvas.toBlob()`. There is no second code path — which is the main reason to
+keep the pipeline this plain.
+
+State shape:
 
 ```ts
-Document {
-  source:  { bitmap, width, height, name }
-  layers:  Layer[]            // index 0 = bottom
-  canvas:  { width, height, background }
-}
-
-Layer {
-  id, effectId, enabled, params: ParamValues,
-  opacity: number, blend: BlendMode, mask?: MaskRef, seed: number
+{
+  source: { full: ImageData, preview: ImageData, name: string },
+  chain: ChainEntry[],
+  selected: number | null,
 }
 ```
 
-Undo/redo stores serialized `Document` snapshots (they are small — no pixel
-data, just parameters), with slider drags coalesced into one history entry on
-release. The whole document minus the source bitmap serializes to JSON, which
-is also the preset format: a preset is a document with the source stripped.
-
-Every stochastic effect takes an explicit `seed`. Renders are deterministic —
-the same document produces the same pixels, which matters for export
-reproducibility and for meaningful before/after comparison.
+The chain serializes to JSON on its own (it is just ids and numbers), so
+presets and shareable URLs are nearly free later — but neither is built in v1.
 
 ---
 
-## 8. UI, per the visual language
+## 6. UI
 
-The chrome is MORPHXGEN, applied literally: `#222222` void ground, `#e4e3df`
-bone ink, coral `#e48484` reserved for the active layer marker and focus
-rings, hairline grid rules instead of cards, square corners, corner-tick
-brackets framing controls, Intel One Mono throughout, all copy lowercase.
+One screen, three regions, no panels-within-panels:
 
-Three details worth calling out:
+```
+┌─────────────────────────────────────────────────┐
+│ MORPHXGEN            open   export               │  toolbar
+├──────────────────────────────┬──────────────────┤
+│                              │  chain           │
+│                              │  ─────────────   │
+│          canvas              │  ▸ ordered dither│
+│                              │  ▸ film grain    │
+│                              │  + add effect    │
+│                              │ ─────────────────│
+│                              │  params for the  │
+│                              │  selected effect │
+└──────────────────────────────┴──────────────────┘
+```
 
-- The **canvas frame** uses `RenderFrame` with corner ticks — the same motif
-  the brand uses for product renders, which is exactly what the working image
-  is here.
-- Rendering status uses `StatusReadout` in machine-terse register:
-  `rendering...`, `8 passes`, `2048×1365`.
-- Layer rows use coral only for the selected row's marker. No hover glow, no
-  scale-pop — brighten bone toward white per the motion rules, 120ms,
-  `cubic-bezier(0.65,0,0.35,1)`.
+Brand application is literal and cheap: `#222222` ground, `#e4e3df` ink, coral
+`#e48484` on the selected chain row and focus rings only, hairline rules
+instead of cards, square corners, Intel One Mono, all copy lowercase. Corner-
+tick brackets frame the canvas and the export button — the two places the motif
+earns its keep. `tokens.css` is pasted from the visual language doc so that file
+stays authoritative.
 
-The `tokens.css` file is a verbatim copy of the CSS blocks in the visual
-language document. It is generated from that file, not hand-maintained, so
-the brand doc stays the single source of truth.
-
----
-
-## 9. Export
-
-The export dialog offers format (PNG / WebP / JPEG), scale (1× / 2× / custom),
-and an optional "render at source resolution" toggle when the preview is a
-downscaled proxy.
-
-Export re-runs the pipeline at target resolution through `TileRenderer`,
-which:
-
-1. Computes tile size from `MAX_TEXTURE_SIZE` and available memory.
-2. Expands each tile by the maximum `neighborhood` in the stack.
-3. Renders tiles sequentially, yielding to the event loop so the UI stays
-   responsive and a progress readout can update.
-4. Crops the overlap and composites into an `OffscreenCanvas`.
-5. Encodes via `convertToBlob`.
-
-CPU passes are the constraint on tiling: error diffusion propagates error
-across the *whole* image, so a tiled error-diffusion pass would show seams.
-Those passes run whole-image at export, which caps the practical export size
-for stacks containing them. The export dialog surfaces that limit rather than
-failing silently.
+No component library. These are six components; abstracting them into a design
+system would be more code than the components.
 
 ---
 
-## 10. Build order
+## 7. Build order
 
-1. **Engine skeleton** — WebGL2 context, ping-pong targets, one pass-through
-   shader on screen. Prove the plumbing with an image on the canvas.
-2. **Effect contract + registry** — `defineEffect`, the param schema types, and
-   two effects (`ordered_bayer`, `posterize`) to validate the shape.
-3. **Auto-generated inspector** — controls rendered from schema. This is the
-   payoff moment: every subsequent effect ships with a UI for free.
-4. **Layer stack** — ordering, toggle, opacity, blend, the compositor.
-5. **Design system pass** — MORPHXGEN tokens and components across the shell.
-6. **CPU pass host** — worker, transfer, and `error_diffusion` as the proof.
-7. **Effect fill-out** — the remaining catalog, roughly one per session.
-8. **Export + tiling.**
-9. **Persistence + presets.**
+Each step is independently useful and leaves the tool working.
 
-Steps 1–4 are the architecture. Everything after is content and polish against
-a contract that no longer changes.
+1. **Skeleton** — Vite app, drop an image, show it on a canvas. No effects.
+2. **Core + first effect** — `types.ts`, `pipeline.ts`, `registry.ts`, and
+   `ordered.ts`. Hardcode the chain to one effect. Confirm the shape is right
+   before building on it.
+3. **Generated controls** — `Controls.tsx` + `Field.tsx` reading the schema.
+   This is the leverage point: every effect after this ships with a UI free.
+4. **The chain** — add/remove/reorder/toggle/mix.
+5. **Export** — full-res re-run, PNG download.
+6. **Brand pass** — tokens, layout, type.
+
+That is a working tool. Everything after is effects, added one file at a time:
+error diffusion → halftone → grain → palette → block crush → the rest.
 
 ---
 
-## Open questions
+## Assumption to flag
 
-- **Masks** are in the layer model but unspecified. Simplest useful version is
-  a luminance mask sampled from the layer's input; a paintable mask is a much
-  larger surface and probably a later phase.
-- **Animation / export to video** is out of scope for v1, but the deterministic
-  seed plus a `time` uniform means a frame sequence export is a small addition
-  later. Worth not painting into a corner: keep `time` in `PassContext` from
-  the start even though nothing reads it yet.
-- **WASM for CPU passes** — start with plain TypeScript in the worker, measure,
-  and only reach for WASM if error diffusion on a 6000px image is actually too
-  slow.
+I read "diffusion" in your original brief as **error diffusion** (the dithering
+family — Floyd–Steinberg, Atkinson, Stucki) and have scoped accordingly. If you
+meant *reaction-diffusion* — Gray–Scott patterning, iterated hundreds of times
+per frame — that single effect is genuinely GPU work and would need one small
+WebGL escape hatch inside `apply()`. It does not change anything else in this
+document, but it is the one item that would reintroduce shaders, so worth
+settling before step 2.
